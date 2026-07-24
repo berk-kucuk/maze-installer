@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# maze-calamares — launch the Calamares installer on the live session.
+#
+# Calamares must run as root but needs the live user's display. The Maze live
+# session is KDE Plasma WAYLAND, where a root GUI can't reach the user's
+# compositor socket directly. The portable trick (used by most Arch-based live
+# ISOs) is to route Calamares through XWayland (QT_QPA_PLATFORM=xcb) and allow
+# root as an X client, then elevate with pkexec (passwordless via the
+# 49-maze-calamares polkit rule on the live medium).
+#
+# NOTE: verify on a real VM boot — display/elevation on the live session is the
+# classic thing that only proves out at runtime.
+set -u
+
+# Maze is UEFI-only. The whole boot stack — systemd-boot, Unified Kernel Images
+# and shim/MOK Secure Boot — is UEFI-native, and Secure Boot is impossible on
+# BIOS. The ISO ships no BIOS bootmode (profiledef.sh), so in practice the live
+# medium only boots on UEFI; this is a belt-and-suspenders guard for the odd case
+# (custom rebuild, exotic firmware). Refusing here up front is far friendlier than
+# letting Calamares run and fail late at the bootloader step with an install that
+# won't boot. /sys/firmware/efi exists only when the live medium booted via UEFI.
+if [[ ! -d /sys/firmware/efi ]]; then
+    _msg="Maze Linux requires UEFI firmware.
+
+This live medium was booted in legacy BIOS / CSM mode, which Maze does not
+support (its systemd-boot + Unified Kernel Image + Secure Boot stack is UEFI-only).
+
+Reboot and start the installer in UEFI mode — disable CSM / Legacy Boot in your
+firmware setup, then boot the Maze medium again."
+    if [[ "${EUID}" -ne 0 ]] && command -v kdialog >/dev/null 2>&1; then
+        kdialog --title "Maze Linux — UEFI required" --error "${_msg}" >/dev/null 2>&1 || true
+    fi
+    printf '%s\n' "${_msg}" >&2
+    exit 1
+fi
+
+if [[ "${EUID}" -ne 0 ]]; then
+    # Let root connect to the user's X/XWayland server.
+    xhost +SI:localuser:root >/dev/null 2>&1 || true
+    exec pkexec env \
+        DISPLAY="${DISPLAY:-:0}" \
+        XAUTHORITY="${XAUTHORITY:-}" \
+        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+        QT_QPA_PLATFORM=xcb \
+        calamares -d
+fi
+
+exec env QT_QPA_PLATFORM=xcb calamares -d
