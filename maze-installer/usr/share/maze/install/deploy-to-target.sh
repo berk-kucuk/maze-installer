@@ -12,6 +12,33 @@
 set -uo pipefail
 
 TARGET="${1:?usage: deploy-to-target.sh <target-mountpoint> [security-csv]}"
+# Everything below reads, writes and DELETES under $TARGET — the pacman keyring,
+# /home/*, mkinitcpio.conf, the ESP. Calamares runs this with dontChroot: true,
+# so those paths are resolved on the LIVE system: if ${ROOT} ever arrived empty
+# or as "/" (a failed mount, a hand-run command, a Calamares variable that did
+# not expand) the script would take the running installer apart instead of the
+# machine being installed. `${1:?}` above only catches unset/empty, so bar "/"
+# explicitly. Stripping a trailing slash first also turns a bare "/" into "",
+# which this same test then rejects.
+TARGET="${TARGET%/}"
+if [[ -z "${TARGET}" || "${TARGET}" == "/" ]]; then
+    echo "deploy-to-target.sh: refusing to operate on '/' — that is the live system, not the install target." >&2
+    exit 1
+fi
+if [[ ! -d "${TARGET}" ]]; then
+    echo "deploy-to-target.sh: target '${TARGET}' is not a directory." >&2
+    exit 1
+fi
+# SECURITY: clear any leftover build-time sudoers from a PREVIOUS run of this
+# script. install_aur_packages() grants the build user NOPASSWD:ALL for the
+# duration of the AUR phase and removes it again both explicitly and via an EXIT
+# trap — but neither runs if that phase is SIGKILLed or the installer is torn
+# down under it, and the AUR phase is the longest, most fragile step in the whole
+# install. Left behind, the file is permanent passwordless root on the installed
+# system. Sweep it here (catches a re-run over a half-finished install) and again
+# unconditionally after the AUR phase.
+rm -f "${TARGET}/etc/sudoers.d/99-maze-build" 2>/dev/null || true
+
 # Maze apps are on the live ISO (copied by unpackfs) — always install all.
 MAZE_APPS_CSV="all"
 # Comma-separated list of selected extra packages (AUR + qemu).
@@ -33,7 +60,7 @@ SECURITY_CSV="${2:-}"
 # against the target's own pacman/libalpm, so it can never hit the ABI mismatch
 # that makes the precompiled paru-bin break after a pacman soname bump. It is
 # listed first so the AUR helper is in place early.
-CURATED_AUR_TEMPLATE=(paru brave-origin-bin upscayl-bin session-desktop-bin joplin-bin onlyoffice-bin claude-code)
+CURATED_AUR_TEMPLATE=(paru upscayl-bin session-desktop-bin joplin-bin onlyoffice-bin claude-code)
 CURATED_AUR=()
 if [[ -z "${EXTRAS_CSV}" ]]; then
     # No selection file (legacy/direct call): install everything.
@@ -54,7 +81,12 @@ fi
 #     after a pacman soname bump).
 #   - onlyoffice-bin: deliberately kept OFF the ISO for size, so it must be
 #     installed here (needs network at install time).
-for _always in paru onlyoffice-bin; do
+# NOTE the reversed order: this loop PREPENDS, so iterating onlyoffice-bin first
+# leaves paru at the head of the list. Written the other way round (paru first)
+# it produced "onlyoffice-bin paru" — the exact opposite of the intent above, and
+# onlyoffice-bin is a ~350 MB download with a 30-minute build ceiling and one
+# retry, so a slow mirror could hold the AUR helper back for an hour.
+for _always in onlyoffice-bin paru; do
     if ! printf '%s\n' "${CURATED_AUR[@]}" | grep -qx "${_always}"; then
         CURATED_AUR=("${_always}" "${CURATED_AUR[@]}")
     fi
@@ -62,14 +94,28 @@ done
 # Maze's OWN applications, shipped from the [mazelinux] repo. Calamares (the
 # only caller of this script) always passes the keyword "all", installing the
 # whole set below.
-DEFAULT_MAZE_APPS=(entropy-shield qlam maze-guard hazedrop haze linux-chan-ai sentinai)
+#
+# NOT listed, on purpose — and this list must agree with maze-meta's depends:
+# linux-chan-ai and sentinai. Both can send data to Google Gemini (Linux Chan
+# has no offline mode at all). A distribution whose promise is that nothing
+# leaves the machine by default cannot install them without asking; they stay
+# one `pacman -S` away in [mazelinux]. Until 2.0.0-22 they WERE in this list,
+# so every install got them while maze-meta and the docs said otherwise.
+DEFAULT_MAZE_APPS=(entropy-shield qlam maze-guard hazedrop haze maze-ai maze-connect maze-cloak)
 
 log()  { printf '[maze-deploy] %s\n' "$*"; }
 warn() { printf '[maze-deploy] WARNING: %s\n' "$*" >&2; }
 
 # stdin from /dev/null so a chroot command (e.g. chsh's PAM prompt) can never
 # block the whole install waiting on input that will never arrive.
-in_chroot() { arch-chroot "${TARGET}" "$@" </dev/null; }
+#
+# SNAP_PAC_SKIP=y: snap-pac's pacman hooks call snapper for every transaction
+# run in here (removing maze-installer, installing the Maze apps, the AUR
+# builds). Inside arch-chroot snapper cannot resolve users and there is no
+# snapper config yet (maze-snapshots-setup creates it on the first boot), so
+# each hook only printed "fatal library error, lookup self" into pacman.log.
+# snap-pac honours this variable and skips cleanly.
+in_chroot() { arch-chroot "${TARGET}" env SNAP_PAC_SKIP=y "$@" </dev/null; }
 
 # Firmware type of THIS install. Maze is UEFI-only — the ISO ships no BIOS
 # bootmode (profiledef.sh), so the live medium only boots on UEFI and this is
@@ -92,7 +138,16 @@ copy_to_target() {
     [[ -e "${src}" || -L "${src}" ]] || { warn "missing source ${src}"; return 0; }
     local dst="${TARGET}${src}"
     mkdir -p "$(dirname "${dst}")"
-    cp -a "${src}" "${dst}" 2>/dev/null || warn "could not copy ${src}"
+    # -T (--no-target-directory) is REQUIRED here: plain `cp -a src dst` only copies
+    # src AS dst when dst does not exist. When dst is an existing DIRECTORY it copies
+    # src INTO it instead, producing a nested duplicate —
+    # /usr/share/sddm/themes/maze-oled/maze-oled, /etc/skel/.config/.config, and so on
+    # for every directory this function handles. dst practically always exists,
+    # because unpackfs has already copied the whole live root (including the very
+    # files the maze-* packages installed) to the target before this runs, so the bug
+    # hit all nine directory copies. -T makes dst the destination NAME unconditionally,
+    # merging over whatever is there.
+    cp -aT "${src}" "${dst}" 2>/dev/null || warn "could not copy ${src}"
 }
 
 # Remove machine-specific DISPLAY / OUTPUT state from a config tree so a freshly
@@ -103,7 +158,15 @@ copy_to_target() {
 # which is why the wrong monitor showed up as "Primary".
 #   $1 = home-like dir (its .config / .local live underneath)
 strip_display_state() {
-    local h="$1"
+    local h="${1:-}"
+    # This function deletes paths BELOW $h (rm -rf "${h}/.local/share/kscreen").
+    # An empty or "/" argument would therefore aim those deletions at the LIVE
+    # system running the installer, so refuse both outright instead of relying on
+    # the ".config exists" test below to happen to be false.
+    [[ -n "${h}" && "${h}" != "/" ]] || {
+        warn "strip_display_state: refusing to run on an empty or root path"
+        return 0
+    }
     local cfg="${h}/.config"
     [[ -d "${cfg}" ]] || return 0
     # Wayland: the primary output is stored here as the output with "priority":1.
@@ -131,14 +194,18 @@ strip_display_state() {
 # ---------------------------------------------------------------------------
 log "Deploying Maze configuration to ${TARGET}"
 
-# DNS inside the chroot, set up ONCE up front so every later in_chroot step that
-# needs the network works — the AUR builds (step 11) git clone from the AUR.
-cp -L /etc/resolv.conf "${TARGET}/etc/resolv.conf" 2>/dev/null || true
+# DNS inside the chroot needs no setup here: arch-chroot bind-mounts the live
+# system's /etc/resolv.conf onto the target's before running the command (see
+# chroot_add_resolv_conf in arch-chroot), so every in_chroot step below resolves
+# names. The `cp -L /etc/resolv.conf` this used to do could never work anyway —
+# the target's resolv.conf is a symlink to /run/systemd/resolve/stub-resolv.conf
+# and the target's /run is a fresh tmpfs, so the copy wrote through the symlink
+# to a path that does not exist and failed silently every single time.
 
 # 1) Applications come from two sources, both handled near the end of this
 #    script. Maze's OWN apps (entropy-shield, qlam, maze, ...) install from the
 #    official [mazelinux] pacman repo with 'pacman -S' (see install_maze_repo_apps).
-#    The third-party apps (brave, joplin, paru, ...) are built with makepkg and
+#    The third-party apps (joplin, upscayl, paru, ...) are built with makepkg and
 #    installed with pacman -U inside the target chroot, as the installer-created
 #    user. 'paru' is built from source as part of that set so the installed
 #    system has a working AUR helper for future updates (built from source, it
@@ -188,8 +255,12 @@ copy_to_target /usr/share/plasma/look-and-feel/com.mazelinux.oled
 copy_to_target /usr/share/plasma/look-and-feel/com.mazelinux.oled.light
 copy_to_target /usr/share/sddm/themes/maze-oled
 copy_to_target /etc/sddm.conf.d/20-maze-theme.conf
-# Breeze greeter override (the default SDDM theme) — puts the Maze wallpaper
-# behind Breeze. Breeze itself ships with plasma; this only adds the override.
+# Breeze greeter override — this is what BRANDS the login screen. Breeze is the
+# default greeter (20-maze-theme.conf) and ships with plasma; theme.conf.user is
+# our overlay on it, putting the Maze wallpaper behind the Breeze UI. SDDM merges
+# theme.conf.user over the package's theme.conf, so a Plasma update refreshes the
+# greeter without ever losing the branding. Copying this file is therefore not
+# optional decoration: without it the installed system logs in on stock Breeze.
 copy_to_target /usr/share/sddm/themes/breeze/theme.conf.user
 # Maze CLI tools. NOTE: the installer itself (maze-install + its .desktop launcher)
 # is intentionally NOT deployed — the system is already installed, so it must not
@@ -221,7 +292,7 @@ copy_to_target /usr/local/bin/maze-flatpak-setup
 # (unpackfs already copies these; the explicit copies here are a redundant
 # safety net in case that ever changes.)
 copy_to_target /usr/local/bin/maze-guardd
-copy_to_target /usr/local/bin/maze-guard
+copy_to_target /usr/local/bin/maze-guardctl
 copy_to_target /usr/local/bin/maze-panic
 copy_to_target /usr/local/bin/maze-panic-restore
 copy_to_target /usr/share/applications/maze-panic.desktop
@@ -239,11 +310,13 @@ copy_to_target /usr/share/applications/maze-hardware.desktop
 copy_to_target /usr/local/bin/maze-control-center
 copy_to_target /usr/share/applications/maze-control-center.desktop
 copy_to_target /usr/local/lib/maze
-# Kernel/network hardening, zram swap and hardened Firefox policy. These live in
-# /etc, which (unlike /etc/skel) is not copied wholesale.
+# Kernel/network hardening and zram swap. These live in /etc, which (unlike
+# /etc/skel) is not copied wholesale.
+# NOTE: /etc/firefox/policies/policies.json is deliberately NOT copied — the
+# live ISO's policy pins the Firefox homepage/first-run page to the Maze site,
+# and an installed system should keep Firefox's own defaults instead.
 copy_to_target /etc/sysctl.d/99-maze-hardening.conf
 copy_to_target /etc/systemd/zram-generator.conf
-copy_to_target /etc/firefox/policies/policies.json
 # systemd-oomd tuning + baseline auditd rules.
 copy_to_target /etc/systemd/oomd.conf.d/10-maze.conf
 copy_to_target /etc/systemd/system/-.slice.d/10-oomd.conf
@@ -280,8 +353,6 @@ install_maze_repo_apps() {
         return 0
     fi
     log "Installing Maze applications from the [mazelinux] repo: ${pkgs[*]}"
-    # DNS for pacman to reach the Maze repo / mirrors (also set up front above).
-    cp -L /etc/resolv.conf "${TARGET}/etc/resolv.conf" 2>/dev/null || true
     local _try
     # Refresh databases (retried) so a transient mirror/repo hiccup does not drop
     # the whole set.
@@ -290,13 +361,25 @@ install_maze_repo_apps() {
         warn "pacman -Sy failed (attempt ${_try}/3); retrying in 5s"
         sleep 5
     done
-    # Drop any package that is not actually in a synced repo before installing.
-    # pacman -S aborts the ENTIRE transaction on a single "target not found"
-    # (e.g. a renamed/absent 'maze' package), which would take the real apps —
-    # already present from the ISO — down with it and spam retries. Filter first
-    # so one missing name never blocks the rest.
+    # Only install what is MISSING. unpackfs has already put every app that was
+    # on the ISO onto the target, so this step exists for the ones that were
+    # not (a selection the ISO does not carry). It must never touch the rest:
+    # `pacman -S --needed` only skips an EXACT version match — when the
+    # installed copy is NEWER than the repo's (an ISO built from ./localrepo
+    # with a package that is not published yet), pacman DOWNGRADES it to the
+    # repo version. Seen on a real install, 14 Sep 2026: the ISO shipped haze
+    # 2.11.2 and maze-cloak 1.2.1-2, the installed system ended up with 2.11.1
+    # and 1.2.1-1. Anything already installed is left exactly as unpackfs
+    # delivered it; updates are pacman -Syu's job after first boot.
     local _avail=() _p
     for _p in "${pkgs[@]}"; do
+        if in_chroot pacman -Qq "${_p}" >/dev/null 2>&1; then
+            log "  ${_p}: already on the target ($(in_chroot pacman -Q "${_p}" 2>/dev/null | cut -d' ' -f2)) — left as shipped"
+            continue
+        fi
+        # Drop any package that is not actually in a synced repo. pacman -S
+        # aborts the ENTIRE transaction on a single "target not found", which
+        # would take every other app in the list down with it.
         if in_chroot pacman -Si "${_p}" >/dev/null 2>&1; then
             _avail+=("${_p}")
         else
@@ -305,7 +388,7 @@ install_maze_repo_apps() {
     done
     pkgs=("${_avail[@]}")
     if [[ ${#pkgs[@]} -eq 0 ]]; then
-        log "No installable Maze repo packages remain after filtering; skipping"
+        log "Every selected Maze application is already on the target; nothing to install from [mazelinux]"
         return 0
     fi
     for _try in 1 2 3; do
@@ -323,7 +406,7 @@ install_maze_repo_apps() {
 # The actual AUR build is the slowest, most failure-prone step (large downloads,
 # building as the user), so it is deferred to the very END of this script via the
 # function below. That way the fast, critical desktop config — Maze Plymouth
-# splash, wallpaper, Breeze greeter, services — is ALWAYS applied first and can
+# splash, wallpaper, branded greeter, services — is ALWAYS applied first and can
 # never be skipped because an AUR build was slow or got stuck.
 install_aur_packages() {
     # Only the third-party curated apps are built from the AUR here. Maze's OWN
@@ -347,11 +430,11 @@ install_aur_packages() {
     [[ -n "${build_home}" ]] || build_home="/home/${build_user}"
     log "AUR build user: ${build_user} (home ${build_home}; logging to /var/log/maze-aur-install.log on the target)"
 
-    # DNS inside the chroot so git can reach the AUR and pacman the mirrors.
-    cp -L /etc/resolv.conf "${TARGET}/etc/resolv.conf" 2>/dev/null || true
     # Temporary passwordless sudo for the build user (makepkg calls sudo pacman).
     local sudoers="${TARGET}/etc/sudoers.d/99-maze-build"
-    printf '%s ALL=(ALL) NOPASSWD: ALL\n' "${build_user}" > "${sudoers}"
+    # env_keep: the build script's `sudo pacman -U` must inherit SNAP_PAC_SKIP
+    # from in_chroot (sudo's env_reset would drop it and snap-pac would fire).
+    printf 'Defaults env_keep += "SNAP_PAC_SKIP"\n%s ALL=(ALL) NOPASSWD: ALL\n' "${build_user}" > "${sudoers}"
     chmod 440 "${sudoers}"
     trap 'rm -f "'"${sudoers}"'"' EXIT
 
@@ -381,7 +464,7 @@ rc=0
 failed=()
 
 # Verbose build output (git/makepkg/pacman) goes ONLY to this file; the terminal
-# gets just short, human-readable status lines ("Installing brave-bin from the
+# gets just short, human-readable status lines ("Installing onlyoffice-bin from the
 # AUR..."). The file lives in the build user's home (always writable) and is
 # folded into /var/log/maze-aur-install.log by the caller afterwards.
 VLOG="${HOME:-/tmp}/.maze-aur-verbose.log"
@@ -413,7 +496,7 @@ retry() {
 build_one() {
     local pkg="$1" tmp ok=1
     # Already installed? Then there is nothing to build. The curated apps that
-    # ship on the live ISO (brave-origin-bin, upscayl-bin, session-desktop-bin,
+    # ship on the live ISO (upscayl-bin, session-desktop-bin,
     # joplin-bin, claude-code, ...) were prebuilt from the AUR into Maze's local
     # repo at ISO-build time, so unpackfs has already copied them onto the target
     # — fully built and pacman-registered. Re-cloning and re-building them here
@@ -437,7 +520,14 @@ build_one() {
             # files from a previous partial/retried run don't cause a
             # "conflicting files" failure (these apps ship a self-contained venv).
             shopt -s nullglob
-            local pkgfiles=("$tmp/$pkg"/*.pkg.tar.*)
+            # makepkg's default OPTIONS=(debug) also emits <pkg>-debug split
+            # packages; installing them left paru-debug on every machine. Skip
+            # them — nobody debugs paru with gdb on a desktop install.
+            local pkgfiles=() _pf
+            for _pf in "$tmp/$pkg"/*.pkg.tar.*; do
+                case "$(basename "${_pf}")" in *-debug-*) continue ;; esac
+                pkgfiles+=("${_pf}")
+            done
             shopt -u nullglob
             if [[ ${#pkgfiles[@]} -gt 0 ]]; then
                 if retry 2 sudo pacman -U --noconfirm --needed --overwrite '*' "${pkgfiles[@]}"; then
@@ -494,7 +584,7 @@ MAKEPKG
     # Owned by the build user so they can read/execute it.
     in_chroot chown "${build_user}:${build_user}" "${buildscript_in_chroot}" 2>/dev/null || true
 
-    # The build script prints only short status lines ("Installing brave-bin from
+    # The build script prints only short status lines ("Installing onlyoffice-bin from
     # the AUR...") to stdout; post_install runs this with peek_output=True, so the
     # user sees those concise lines live instead of a frozen screen. The verbose
     # git/makepkg/pacman output is written to the build user's ~/.maze-aur-verbose.log
@@ -554,7 +644,23 @@ setup_secure_boot() {
     # Signing tooling is already on the target via unpackfs; top up if online.
     # systemd-ukify provides ukify, which kernel-install's own UKI plugin uses
     # (layout=uki, /etc/kernel/install.conf) to build the UKI that shim chainloads.
-    in_chroot pacman -S --needed --noconfirm sbsigntools mokutil efitools systemd-ukify >/dev/null 2>&1 || true
+    # (efitools was in this list but nothing ever called sign-efi-sig-list or
+    # cert-to-efi-sig-list — Maze signs with sbsign and enrolls with mokutil.)
+    #
+    # Best-effort ONLY, and it normally does nothing: this runs at step 5b, well
+    # before the target keyring is initialised (step 8b), so pacman cannot verify
+    # signatures yet and the call fails. That is fine — sbsigntools, mokutil and
+    # systemd-ukify all ship on the ISO and unpackfs has already put them on the
+    # target. This line exists purely to top up an image that somehow lacks them.
+    # Only the ones that are genuinely absent: `-S --needed` would DOWNGRADE an
+    # installed maze-secureboot that is newer than the repo's (ISO built from
+    # ./localrepo) if the keyring happened to work here. Same rule as
+    # install_maze_repo_apps — never touch what unpackfs delivered.
+    local _sbmiss=() _sbp
+    for _sbp in maze-secureboot sbsigntools mokutil systemd-ukify; do
+        in_chroot pacman -Qq "${_sbp}" >/dev/null 2>&1 || _sbmiss+=("${_sbp}")
+    done
+    [[ ${#_sbmiss[@]} -gt 0 ]] && { in_chroot pacman -S --needed --noconfirm "${_sbmiss[@]}" >/dev/null 2>&1 || true; }
 
     local keydir="${TARGET}/var/lib/maze-secureboot"
     mkdir -p "${keydir}"; chmod 700 "${keydir}"
@@ -575,326 +681,50 @@ setup_secure_boot() {
         in_chroot chmod 600 /var/lib/maze-secureboot/MOK.key >/dev/null 2>&1 || true
     fi
 
-    # 2) The signer script. kernel-install (layout=uki) already built the real
-    #    Unified Kernel Image under $ESP/EFI/Linux/ — this script finds it, signs
-    #    it with the per-machine MOK key, and installs it as grubx64.efi — the
-    #    second stage shim chainloads by that exact name. The shim ALWAYS
-    #    verifies its second stage via its own shim_lock protocol (MOK-backed),
-    #    so strict firmware (MSI/ASUS) that ignores MOK for loose kernels and
-    #    only checks db no longer rejects the boot. The kernel is embedded
-    #    inside the UKI, so no separate firmware LoadImage() of vmlinuz ever
-    #    happens.
-    install -Dm755 /dev/stdin "${TARGET}/usr/local/bin/maze-sb-sign" <<'SBSIGN'
-#!/bin/sh
-# Managed by Maze Linux. Signs the kernel-install-built Unified Kernel Image
-# (layout=uki) that shim chainloads as grubx64.efi. Idempotent.
-# Usage: maze-sb-sign [ESP_MOUNTPOINT] [--force-bootloader]
-set -eu
-
-KEYDIR=/var/lib/maze-secureboot
-KEY="$KEYDIR/MOK.key"
-CRT="$KEYDIR/MOK.crt"
-CER="$KEYDIR/MOK.cer"
-
-[ -r "$KEY" ] && [ -r "$CRT" ] || { echo "maze-sb-sign: no MOK key, skipping" >&2; exit 0; }
-
-# Serialize all invocations. This script is triggered from up to three
-# independent, overlapping sources for a single kernel update — the
-# 85-maze-kernel-install.hook -> kernel-install add -> 95-maze-sb-sign.install
-# plugin, the zz-maze-secureboot.hook (same pacman transaction), and the
-# maze-sb-resign.path unit reacting to the new UKI file appearing under
-# $ESP/EFI/Linux. Without a lock, two concurrent instances can both sign the
-# same file to the same fixed temp name (sign_inplace's "$f.maze-signed" /
-# the grubx64.efi temp below) and race each other's write, producing a
-# truncated/corrupt result on disk. Confirmed in production: overlapping
-# maze-sb-resign.service runs 0 seconds apart left a 63%-truncated UKI and a
-# kernel panic ("No working init found") on next boot. The lock makes every
-# invocation, regardless of trigger, run one at a time.
-LOCKFILE=/run/lock/maze-sb-sign.lock
-# /run/lock can be absent when /run is a fresh tmpfs (e.g. some chroot setups
-# mount their own /run) — without this, exec 9> fails and set -eu aborts the
-# whole signing run.
-mkdir -p /run/lock
-exec 9>"$LOCKFILE"
-if ! flock -n 9; then
-    echo "maze-sb-sign: another instance is running, waiting..." >&2
-    flock 9
-fi
-
-ESP=""
-force_bootloader=0
-for arg in "$@"; do
-    case "$arg" in
-        --force-bootloader) force_bootloader=1 ;;
-        *) ESP="$arg" ;;
-    esac
-done
-
-if [ -z "$ESP" ]; then
-    ESP="$(bootctl --print-esp-path 2>/dev/null || true)"
-    [ -n "${ESP:-}" ] && [ -d "$ESP" ] || ESP=/efi
-    [ -d "$ESP" ] || ESP=/boot
-fi
-if [ ! -d "$ESP" ]; then
-    echo "maze-sb-sign: ESP path '$ESP' does not exist" >&2
-    exit 1
-fi
-
-status_ok=1
-
-install_if_diff() {
-    [ -f "$1" ] || return 0
-    cmp -s "$1" "$2" 2>/dev/null && return 0
-    install -m644 "$1" "$2"
-}
-
-sign_inplace() {
-    f="$1"
-    [ -e "$f" ] || return 0
-    if sbverify --cert "$CRT" "$f" >/dev/null 2>&1; then
-        echo "maze-sb-sign: OK     $f"
+    # 2) The signing machinery itself is NOT written here any more — it ships in
+    #    the `maze-secureboot` package (pulled in by maze-meta, so unpackfs has
+    #    already put it on the target):
+    #
+    #      /usr/bin/maze-sb-sign                                 sign the UKI as grubx64.efi
+    #      /usr/bin/maze-kernel-install-add                      run `kernel-install add`
+    #      /usr/share/libalpm/hooks/85-maze-kernel-install.hook  rebuild on kernel upgrade
+    #      /usr/share/libalpm/hooks/zz-maze-secureboot.hook      belt-and-suspenders re-sign
+    #      /usr/lib/kernel/install.d/95-maze-sb-sign.install     sign inline during kernel-install
+    #      /usr/lib/systemd/system/maze-sb-resign.{service,path} out-of-band self-heal
+    #      /usr/lib/systemd/system/systemd-boot-update.service.d/99-maze-resign.conf
+    #
+    #    Writing them here, as inline heredocs into /usr/local/bin and /etc, is
+    #    exactly what made them unfixable once a machine was installed: pacman
+    #    owned none of those files, so no update could ever replace a broken
+    #    signer — on the one subsystem whose failure mode is "does not boot".
+    #    What stays below is what is genuinely per-machine: the MOK key, the shim
+    #    binaries copied off the ISO, the NVRAM entry and the enrollment note.
+    #
+    #    Fail LOUDLY if the package is absent. Silently continuing would produce
+    #    a machine that is signed once, here, and never again — which looks fine
+    #    until the first kernel update and then does not boot.
+    if [[ ! -x "${TARGET}/usr/bin/maze-sb-sign" ]]; then
+        warn "Secure Boot: maze-secureboot is NOT on the target (/usr/bin/maze-sb-sign missing)."
+        warn "Secure Boot: without it kernel updates never rebuild or re-sign the UKI — skipping SB setup."
+        warn "Secure Boot: add 'maze-secureboot' to packages.x86_64 (and maze-meta) and rebuild the ISO."
         return 0
     fi
-    if sbsign --key "$KEY" --cert "$CRT" --output "$f.maze-signed" "$f" 2>/dev/null; then
-        mv -f "$f.maze-signed" "$f"
-        echo "maze-sb-sign: SIGNED $f"
-    else
-        rm -f "$f.maze-signed"
-        echo "maze-sb-sign: FAIL   $f" >&2
-        status_ok=0
-    fi
-}
 
-BOOTDIR="$ESP/EFI/BOOT"
-mkdir -p "$BOOTDIR"
-install_if_diff "$KEYDIR/shimx64.efi" "$BOOTDIR/BOOTX64.EFI"
-install_if_diff "$KEYDIR/mmx64.efi"   "$BOOTDIR/mmx64.efi"
-install_if_diff "$CER"                "$ESP/MOK.cer"
-
-# --- Sign the UKI and install as grubx64.efi (shim's second stage) ---
-# /etc/kernel/install.conf ships `layout=uki`, so `kernel-install add` (run by
-# Calamares' bootloader module, and again below by deploy-to-target.sh) already
-# built a real UKI (kernel + initramfs + /etc/kernel/cmdline + systemd PE stub,
-# via kernel-install's own ukify plugin) at $ESP/EFI/Linux/<machine-id>-<kver>.efi.
-# No manual `ukify build` needed here — just sign that file and install it as
-# grubx64.efi, the exact name shim chainloads. This makes the boot chain
-# portable across ALL UEFI firmware (shim verifies its second stage via
-# shim_lock/MOK, never via db).
-GRUB="$BOOTDIR/grubx64.efi"
-UKI="$(ls -t "$ESP"/EFI/Linux/*.efi 2>/dev/null | head -1)"
-
-if [ -n "$UKI" ]; then
-    # Sign to a temp file and rename into place — never write $GRUB directly.
-    # sbsign dying partway (disk full, killed mid-transaction) must not leave
-    # a truncated/corrupt grubx64.efi with no working fallback, since it is the
-    # ONLY thing shim chainloads.
-    if sbsign --key "$KEY" --cert "$CRT" --output "$GRUB.maze-signed" "$UKI" 2>/dev/null; then
-        mv -f "$GRUB.maze-signed" "$GRUB"
-        echo "maze-sb-sign: SIGNED $GRUB (from $UKI)"
-    else
-        rm -f "$GRUB.maze-signed"
-        echo "maze-sb-sign: FAIL signing $UKI as $GRUB" >&2
-        status_ok=0
-    fi
-else
-    echo "maze-sb-sign: WARNING — no kernel-install UKI found under $ESP/EFI/Linux" >&2
-    # Fallback: sign any existing grubx64.efi in place (best-effort)
-    sign_inplace "$GRUB"
-fi
-
-# Also sign any loose kernels/UKIs on the ESP as a safety net (in case the
-# firmware boots via a different path). These are NOT the primary boot path —
-# the UKI as grubx64.efi is — but keeping them signed is harmless.
-boot_path="$(bootctl --print-boot-path 2>/dev/null || true)"
-dirs="$ESP"
-for d in "$boot_path" /boot /efi; do
-    [ -n "$d" ] && [ -d "$d" ] || continue
-    case " $dirs " in *" $d "*) ;; *) dirs="$dirs $d" ;; esac
-done
-for d in $dirs; do
-    for f in "$d"/EFI/Linux/*.efi "$d"/vmlinuz-* "$d"/*/*/linux; do
-        sign_inplace "$f"
-    done
-done
-
-if [ "$status_ok" = 1 ]; then
-    echo "maze-sb-sign: done (ESP=$ESP)"
-else
-    echo "maze-sb-sign: WARNING - some boot files are NOT validly signed (ESP=$ESP)" >&2
-    exit 1
-fi
-SBSIGN
-
-    # THE MISSING LINK: `/etc/kernel/install.conf` ships `layout=uki`, but that
-    # only takes effect when `kernel-install` actually RUNS. On a stock Arch
-    # install (and on the "de-archiso'd" preset calamares-mount-api.sh writes,
-    # see its `default_image=` preset) an ordinary `linux` package upgrade is
-    # handled ENTIRELY by mkinitcpio's own pacman hook
-    # (`/usr/share/libalpm/hooks/90-mkinitcpio-install.hook`, shipped by the
-    # mkinitcpio package), which reads the preset and calls `mkinitcpio -P`
-    # directly — it NEVER calls `kernel-install`. Without this hook,
-    # `kernel-install add` is only ever invoked once, manually, by this very
-    # script at install time — every kernel update after that leaves the UKI at
-    # $ESP/EFI/Linux/ stale (still the OLD kernel version, whose
-    # /usr/lib/modules/<ver> pacman has since deleted). The system keeps
-    # booting that stale UKI until it fails to find its own modules (e.g.
-    # `vfat`/`nvidia_uvm`) at boot. Neither the kernel-install plugin below nor
-    # the .path self-heal unit can help — they only react to kernel-install
-    # actually being invoked, which is exactly the step missing here.
-    install -Dm755 /dev/stdin "${TARGET}/usr/local/bin/maze-kernel-install-add" <<'KIADD'
-#!/bin/sh
-# Managed by Maze Linux. Invoked by the 85-maze-kernel-install.hook pacman
-# hook (NeedsTargets) for every usr/lib/modules/*/vmlinuz install/upgrade.
-# Runs `kernel-install add` so layout=uki actually rebuilds the Unified Kernel
-# Image on the ESP for the new kernel — mkinitcpio's own preset-driven pacman
-# hook only ever produces loose /boot/initramfs-*.img and never calls
-# kernel-install itself. Reads NUL-free paths (one per line) from stdin.
-set -eu
-while IFS= read -r f; do
-    case "$f" in
-        usr/lib/modules/*/vmlinuz)
-            kver="${f#usr/lib/modules/}"
-            kver="${kver%/vmlinuz}"
-            [ -d "/usr/lib/modules/$kver" ] || continue
-            kernel-install add "$kver" "/usr/lib/modules/$kver/vmlinuz" \
-                || echo "maze-kernel-install-add: kernel-install add failed for $kver" >&2
-            ;;
-    esac
-done
-KIADD
-
-    # Named `85-` so it runs BEFORE both mkinitcpio's own `90-...` hook and the
-    # `zz-...` re-sign hook below: kernel-install add here (and the
-    # 95-maze-sb-sign.install plugin it triggers, further down) must build and
-    # sign the fresh UKI before zz-maze-secureboot.hook does its idempotent
-    # re-check/re-sign pass.
-    install -Dm644 /dev/stdin "${TARGET}/etc/pacman.d/hooks/85-maze-kernel-install.hook" <<'KIHOOK'
-[Trigger]
-Type = Path
-Operation = Install
-Operation = Upgrade
-Target = usr/lib/modules/*/vmlinuz
-
-[Action]
-Description = Building Unified Kernel Image via kernel-install (Maze)...
-When = PostTransaction
-Exec = /usr/local/bin/maze-kernel-install-add
-NeedsTargets
-KIHOOK
-
-    # BELT-AND-SUSPENDERS layer: re-signs the systemd-boot/shim BINARY (and is a
-    # fallback kernel re-sign) after anything that touches the bootloader/kernel,
-    # in case the 85- hook above or the kernel-install plugin below did not run
-    # (e.g. `kernel-install` missing at the time, or `reinstall-kernels` run
-    # manually outside any pacman transaction — the .path self-heal unit further
-    # down covers that case too).
-    #
-    # Named `zz-` so it is the last PostTransaction hook (after mkinitcpio/systemd).
-    # Remove any earlier-named copy so an in-place upgrade does not run both.
-    rm -f "${TARGET}/etc/pacman.d/hooks/95-maze-secureboot.hook" 2>/dev/null || true
-    install -Dm644 /dev/stdin "${TARGET}/etc/pacman.d/hooks/zz-maze-secureboot.hook" <<'SBHOOK'
-[Trigger]
-Type = Path
-Operation = Install
-Operation = Upgrade
-Target = usr/lib/modules/*/vmlinuz
-Target = usr/lib/systemd/boot/efi/*
-Target = boot/vmlinuz-*
-Target = boot/initramfs-*.img
-
-[Trigger]
-Type = Package
-Operation = Install
-Operation = Upgrade
-Target = nvidia
-Target = nvidia-dkms
-Target = nvidia-open
-Target = nvidia-open-dkms
-Target = nvidia-lts
-Target = nvidia-utils
-Target = dkms
-Target = mkinitcpio
-Target = systemd
-
-[Action]
-Description = Signing bootloader and kernels for Secure Boot (Maze)...
-When = PostTransaction
-Exec = /usr/local/bin/maze-sb-sign --force-bootloader
-SBHOOK
-
-    # kernel-install plugin — rebuilds + re-signs the UKI (grubx64.efi) inline
-    # during kernel-install. Since the installed system boots via shim → UKI (not
-    # shim → systemd-boot → BLS kernel), every kernel update must rebuild the UKI.
-    # This fires for EVERY kernel write — pacman, manual reinstall-kernels, a
-    # systemd/kernel-install upgrade — so the UKI on the ESP is always current and
-    # signed. (`add` only; `remove` has nothing to do.)
-    install -Dm755 /dev/stdin "${TARGET}/etc/kernel/install.d/95-maze-sb-sign.install" <<'KISIGN'
-#!/bin/sh
-# Managed by Maze Linux. Rebuilds + signs the UKI (grubx64.efi) after every
-# kernel-install add, so the shim chain stays current and signed.
-set -eu
-[ "${1:-}" = "add" ] || exit 0
-
-KEYDIR=/var/lib/maze-secureboot
-[ -r "$KEYDIR/MOK.key" ] && [ -r "$KEYDIR/MOK.crt" ] || exit 0
-command -v ukify >/dev/null 2>&1 || exit 0
-command -v sbsign >/dev/null 2>&1 || exit 0
-
-# Delegate to the full signer script — it finds the UKI kernel-install just
-# built under $ESP/EFI/Linux/, signs it with the MOK key, and installs it as
-# grubx64.efi on the ESP. Using the full script (instead of duplicating the
-# find/sbsign logic here) keeps a single source of truth.
-/usr/local/bin/maze-sb-sign --force-bootloader >/dev/null 2>&1 || true
-exit 0
-KISIGN
-
-    # systemd .path unit + once-per-boot service: self-heal for kernel writes that
-    # happen with no pacman transaction (manual `kernel-install`/`reinstall-kernels`,
-    # a manual `mkinitcpio -P`). The kernel-install plugin above is the primary
-    # inline signer; this watches loader/entries (and EFI/Linux) so a freshly
-    # written BLS kernel/UKI still gets re-signed even when the plugin is bypassed.
-    install -Dm644 /dev/stdin "${TARGET}/etc/systemd/system/maze-sb-resign.service" <<'SBSVC'
-[Unit]
-Description=Re-sign bootloader and kernels for Secure Boot (Maze)
-After=local-fs.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/maze-sb-sign
-
-[Install]
-WantedBy=multi-user.target
-SBSVC
-    install -Dm644 /dev/stdin "${TARGET}/etc/systemd/system/maze-sb-resign.path" <<'SBPATH'
-[Unit]
-Description=Watch for regenerated kernels/UKIs and re-sign them (Maze Secure Boot)
-
-[Path]
-# Every `kernel-install add` (layout=uki) writes the UKI straight to
-# $ESP/EFI/Linux/<machine-id>-<kver>.efi, so watching that directory reliably
-# catches an out-of-band kernel write (manual reinstall-kernels / kernel-install
-# with no pacman transaction) — whereas watching /boot itself does NOT, since
-# adding a file under a sub-directory leaves /boot's own mtime untouched. The
-# loader/entries paths are kept as a defensive fallback in case layout ever
-# reverts to bls. Both ESP mount points (/boot and /efi) are listed; systemd
-# waits for whichever exists.
-PathChanged=/boot/loader/entries
-PathChanged=/efi/loader/entries
-PathChanged=/boot/EFI/Linux
-PathChanged=/efi/EFI/Linux
-Unit=maze-sb-resign.service
-
-[Install]
-WantedBy=paths.target
-SBPATH
+    # The package's .install scriptlet ran in the ISO build chroot, so the units
+    # are already enabled in the tree unpackfs copied. Re-apply anyway: cheap,
+    # idempotent, and it covers an image built before the preset landed.
     in_chroot systemctl enable maze-sb-resign.path maze-sb-resign.service >/dev/null 2>&1 \
         || warn "Secure Boot: could not enable maze-sb-resign units"
-    # Mask systemd's own boot updater: `bootctl update` would overwrite the shim at
-    # EFI/BOOT/BOOTX64.EFI with an unsigned systemd-boot and break the chain.
-    in_chroot systemctl mask systemd-boot-update.service >/dev/null 2>&1 || true
+
+    # `bootctl update` replaces EFI/BOOT/BOOTX64.EFI with an UNSIGNED systemd-boot.
+    # Maze used to `systemctl mask` the unit outright, which also meant systemd-boot
+    # could never be updated again (security fixes included). The packaged
+    # 99-maze-resign.conf drop-in repairs the chain as ExecStartPost instead, so
+    # undo any mask an older Maze install left behind.
+    in_chroot systemctl unmask systemd-boot-update.service >/dev/null 2>&1 || true
 
     # 3) Sign now (explicit ESP — bootctl is unreliable in the install chroot).
-    if in_chroot /usr/local/bin/maze-sb-sign --force-bootloader "${esp_rel}"; then
+    if in_chroot /usr/bin/maze-sb-sign --force-bootloader "${esp_rel}"; then
         MAZE_SB_ESP="${esp_rel}"
     else
         warn "Secure Boot: initial signing reported problems; boot with SB disabled until resolved"
@@ -912,6 +742,28 @@ SBPATH
             disk="${BASH_REMATCH[1]}"; partn="${BASH_REMATCH[2]}"
         fi
         if [[ -n "${disk}" && -n "${partn}" ]]; then
+            # Remove any earlier "Maze Linux" entry pointing at a partition that
+            # no longer exists before adding this one. Without this every
+            # reinstall on the same machine left another identical line in the
+            # firmware boot menu — a box installed four times showed four "Maze
+            # Linux" entries, three of them aimed at partitions the reinstall had
+            # just wiped. Only dead ones go: an entry whose partition is still
+            # present may belong to another Maze install the user still boots.
+            local _live_guids _bn _bguid
+            _live_guids="$(lsblk -rno PARTUUID 2>/dev/null | tr 'A-Z' 'a-z' | grep . || true)"
+            if [[ -n "${_live_guids}" ]]; then
+                while read -r _bn _bguid; do
+                    [[ -n "${_bn}" ]] || continue
+                    grep -Fxq "${_bguid}" <<<"${_live_guids}" && continue
+                    in_chroot efibootmgr --bootnum "${_bn}" --delete-bootnum >/dev/null 2>&1 \
+                        && log "Secure Boot: removed stale 'Maze Linux' entry Boot${_bn} (its partition is gone)" \
+                        || true
+                done < <(in_chroot efibootmgr -v 2>/dev/null \
+                           | grep -E '^Boot[0-9A-Fa-f]{4}\*? +Maze Linux\b' \
+                           | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*HD([0-9]*,GPT,\([0-9a-fA-F-]*\),.*/\1 \2/p' \
+                           | tr 'A-Z' 'a-z')
+            fi
+
             in_chroot efibootmgr --create --disk "${disk}" --part "${partn}" \
                 --label "Maze Linux" --loader '\EFI\BOOT\BOOTX64.EFI' --unicode >/dev/null 2>&1 \
                 || warn "Secure Boot: NVRAM entry not created (relying on removable fallback)"
@@ -926,9 +778,13 @@ SBPATH
     # honoured when shim is in the chain. Delete every such entry so the firmware
     # can only boot through shim (our "Maze Linux" entry, or the removable
     # \EFI\BOOT\BOOTX64.EFI fallback — both are shim).
+    # Newer bootctl creates TWO entries: "Linux Boot Manager" -> systemd-bootx64.efi
+    # and "Fallback Linux Boot Manager" -> systemd-boot-fallbackx64.efi. The old
+    # pattern here only matched the first; a real install kept the fallback one
+    # (unsigned, can never boot with Secure Boot on) as Boot0001.
     local bn
     for bn in $(in_chroot efibootmgr -v 2>/dev/null \
-                  | grep -i 'systemd-bootx64\.efi' \
+                  | grep -iE 'systemd-boot(-fallback)?x64\.efi' \
                   | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p'); do
         in_chroot efibootmgr --bootnum "${bn}" --delete-bootnum >/dev/null 2>&1 \
             && log "Secure Boot: removed unsigned direct systemd-boot entry Boot${bn}" \
@@ -976,6 +832,60 @@ strip_installer_launcher() {
 }
 strip_installer_launcher "${TARGET}/etc/skel/.config/plasma-org.kde.plasma.desktop-appletsrc"
 
+# 2b-ter) Firefox as the default browser on the installed system -------------
+# Firefox is Maze's browser. The skel's own mimeapps.list already points at it,
+# but /etc/xdg/mimeapps.list — the SYSTEM-WIDE fallback that covers accounts
+# created later, outside skel — does not exist on the ISO, so this is what puts
+# it there. Rewrites ONLY the web handler keys; mailto/message-rfc822
+# (Thunderbird) and anything else in the file are preserved. Creates the file,
+# and any missing section, when absent.
+set_default_browser() {
+    local f="$1" tmp
+    [[ -n "${f}" ]] || return 0
+    mkdir -p "$(dirname "${f}")" 2>/dev/null || true
+    [[ -f "${f}" ]] || : > "${f}"
+    tmp="${f}.maze-tmp"
+    awk '
+        BEGIN {
+            n = split("x-scheme-handler/http x-scheme-handler/https x-scheme-handler/about \
+                       x-scheme-handler/unknown x-scheme-handler/chrome text/html \
+                       application/xhtml+xml", k, /[ \t\n]+/)
+        }
+        # Drop every pre-existing web-handler line, wherever it sits.
+        { for (i = 1; i <= n; i++) if (index($0, k[i] "=") == 1) next }
+        /^\[Default Applications\]/ {
+            print; for (i = 1; i <= n; i++) print k[i] "=firefox.desktop"; d = 1; next
+        }
+        /^\[Added Associations\]/ {
+            print; for (i = 1; i <= n; i++) print k[i] "=firefox.desktop;"; a = 1; next
+        }
+        { print }
+        END {
+            if (!d) { print "[Default Applications]"; for (i = 1; i <= n; i++) print k[i] "=firefox.desktop" }
+            if (!a) { print ""; print "[Added Associations]"; for (i = 1; i <= n; i++) print k[i] "=firefox.desktop;" }
+        }
+    ' "${f}" > "${tmp}" 2>/dev/null && mv -f "${tmp}" "${f}" 2>/dev/null \
+        || { rm -f "${tmp}" 2>/dev/null; warn "default browser: could not update ${f}"; return 0; }
+    chmod 644 "${f}" 2>/dev/null || true
+}
+# KDE keeps its OWN default-browser key in kdeglobals ([General]
+# BrowserApplication) and several KDE apps consult it before mimeapps.list, so a
+# stale value there would win over everything above. Rewrite it when present;
+# when the key is absent (the case on a current ISO) KDE falls back to
+# mimeapps.list, which is already correct, so there is nothing to add.
+set_kde_browser() {
+    local f="$1"
+    [[ -f "${f}" ]] || return 0
+    sed -i -E 's#^BrowserApplication=.*$#BrowserApplication=firefox.desktop#' "${f}" 2>/dev/null \
+        || warn "default browser: could not update ${f}"
+}
+log "Setting Firefox as the default browser"
+# System-wide fallback (covers accounts created later that bypass skel) …
+set_default_browser "${TARGET}/etc/xdg/mimeapps.list"
+# … and the skel every new user is seeded from.
+set_default_browser "${TARGET}/etc/skel/.config/mimeapps.list"
+set_kde_browser     "${TARGET}/etc/skel/.config/kdeglobals"
+
 # 2c-bis) Strip LIVE-ONLY files that the Calamares OFFLINE (unpackfs) install
 # copies wholesale onto the target. The live medium is intentionally permissive
 # (passwordless sudo/pkexec, autologin) so the installer can run unattended; NONE
@@ -991,14 +901,97 @@ rm -f "${TARGET}/etc/polkit-1/rules.d/49-maze-calamares.rules" 2>/dev/null || tr
 rm -f "${TARGET}/etc/systemd/system/getty@tty1.service.d/autologin.conf" 2>/dev/null || true
 rmdir "${TARGET}/etc/systemd/system/getty@tty1.service.d" 2>/dev/null || true
 rm -f "${TARGET}/etc/sddm.conf.d/10-maze-autologin.conf" 2>/dev/null || true
+# 3b. The Firefox enterprise policy is LIVE-ONLY. It pins the homepage and the
+#     first-run page to the Maze site, which is what the live session should
+#     show — but an installed system's Firefox must come up with its own stock
+#     defaults. unpackfs copies the whole live root, so the file is already on
+#     the target and has to be deleted explicitly (the deploy no longer copies
+#     it either). rmdir only removes the directories if nothing else lives there.
+rm -f "${TARGET}/etc/firefox/policies/policies.json" 2>/dev/null || true
+rmdir "${TARGET}/etc/firefox/policies" "${TARGET}/etc/firefox" 2>/dev/null || true
 # 4. The Calamares installer launcher itself.
 rm -f "${TARGET}/usr/local/bin/maze-calamares" 2>/dev/null || true
 rm -f "${TARGET}/usr/share/applications/maze-calamares.desktop" 2>/dev/null || true
+
+# Deleting the FILES is not enough: maze-installer stays registered in the
+# target's pacman database, so every `pacman -Qkk` on the installed machine
+# reports the files we just removed as missing, forever — and calamares plus
+# xorg-xhost, pulled in only to run the installer, stay on the desktop.
+#
+# Remove the packages properly. This runs in the TARGET chroot, so the Calamares
+# process driving this install (which lives on the LIVE medium) is untouched.
+#
+# calamares and xorg-xhost are named EXPLICITLY: packages.x86_64 lists both, so
+# pacman marks them "explicitly installed" and `-Rns maze-installer` never
+# touches them (the old comment here assumed it would; a real install kept
+# calamares 3.4.2 on the desktop). Each name is checked first — a single
+# missing target aborts the whole -Rns transaction.
+_live_pkgs=()
+for _lp in maze-installer calamares xorg-xhost; do
+    in_chroot pacman -Qq "${_lp}" >/dev/null 2>&1 && _live_pkgs+=("${_lp}")
+done
+if [[ ${#_live_pkgs[@]} -gt 0 ]]; then
+    if in_chroot pacman -Rns --noconfirm "${_live_pkgs[@]}" >/dev/null 2>&1; then
+        log "Removed the live-only installer packages from the installed system: ${_live_pkgs[*]}"
+    else
+        warn "Could not remove ${_live_pkgs[*]} from the target; run 'sudo pacman -Rns ${_live_pkgs[*]}' after first boot"
+    fi
+fi
 # 5. The live-user build helper (harmless but live-only).
 rm -f "${TARGET}/usr/local/share/maze/setup-live-user.sh" 2>/dev/null || true
+# 5a-bis. archiso/releng leftovers that nothing on an installed system uses.
+#     unpackfs copies them all; they are harmless but they are also noise in
+#     `systemctl list-unit-files`, /usr/local/bin and root's login. The reflector
+#     config is NOT in this list: reflector.timer (enabled) reads it.
+rm -f "${TARGET}/etc/systemd/system/choose-mirror.service" \
+      "${TARGET}/etc/systemd/system/livecd-talk.service" \
+      "${TARGET}/etc/systemd/system/livecd-alsa-unmuter.service" \
+      "${TARGET}"/etc/systemd/system/*.wants/choose-mirror.service \
+      "${TARGET}"/etc/systemd/system/*.wants/livecd-talk.service \
+      "${TARGET}"/etc/systemd/system/*.wants/livecd-alsa-unmuter.service \
+      "${TARGET}/usr/local/bin/choose-mirror" \
+      "${TARGET}/usr/local/bin/Installation_guide" \
+      "${TARGET}/usr/local/bin/livecd-sound" \
+      "${TARGET}/root/.automated_script.sh" \
+      "${TARGET}/root/.zlogin" \
+      "${TARGET}/etc/systemd/network/20-ethernet.network" \
+      "${TARGET}/etc/systemd/network/20-wlan.network" \
+      "${TARGET}/etc/systemd/network/20-wwan.network" \
+      "${TARGET}/etc/systemd/system/systemd-networkd-wait-online.service.d/wait-for-only-one-interface.conf" \
+      2>/dev/null || true
+rm -rf "${TARGET}/usr/local/share/livecd-sound" 2>/dev/null || true
+rmdir "${TARGET}/etc/systemd/system/systemd-networkd-wait-online.service.d" 2>/dev/null || true
 # 5b. The live medium's /etc/motd ("...live and install medium", "run maze-install",
 #     "default user is root no password") must not greet an installed system.
 rm -f "${TARGET}/etc/motd" 2>/dev/null || true
+# ...and replace it with one that documents the UPDATE MODEL, because this is the
+# single most surprising thing about the installed system.
+#
+# The third-party desktop apps (Joplin, Upscayl, Session, onlyoffice,
+# claude-code) come from the AUR: they were built into Maze's build-time local
+# repo and copied here by unpackfs, and that repo is deliberately dropped from
+# this machine's pacman.conf (its Server is a build-host file:// path). So pacman
+# has no repo that provides them — they are FOREIGN packages, and `pacman -Syu`
+# silently leaves them at their install-time version forever. `paru -Syu` checks
+# the AUR for exactly those packages and is what actually updates them. paru is
+# installed for this reason (and maze-aur-setup re-runs on first boot, falling
+# back to yay, if the install-time build did not finish).
+cat > "${TARGET}/etc/motd" <<'TARGETMOTD'
+
+  Maze Linux
+
+  Updating this system:
+    sudo pacman -Syu     official repos + [mazelinux]  (system, Maze packages)
+    paru -Syu            the above PLUS the AUR desktop apps
+                         (Joplin, Upscayl, Session, ...)
+
+  The AUR apps are not in any pacman repo, so `pacman -Syu` alone will never
+  update them. Use `paru -Syu` for a full update.
+
+  mazelinux --help   Maze tools     maze-control-center   settings GUI
+
+TARGETMOTD
+chmod 644 "${TARGET}/etc/motd" 2>/dev/null || true
 # 5b-bis. The archiso SSH drop-in allows root login with password (live only).
 #     Remove it so the installed system respects 00-maze-hardening.conf's
 #     PermitRootLogin no. (00-maze-hardening.conf is copied separately above.)
@@ -1015,10 +1008,20 @@ rm -f "${TARGET}/etc/systemd/journald.conf.d/volatile-storage.conf" 2>/dev/null 
 rmdir "${TARGET}/etc/systemd/journald.conf.d" 2>/dev/null || true
 # 5e. The archiso resolved drop-in enables MulticastDNS — fine on a throwaway
 #     live session, but on an installed privacy-focused desktop mDNS broadcasts
-#     the hostname to the local network. Remove both live-only resolved drop-ins;
-#     maze-hardening provides its own NetworkManager-based DNS config instead.
+#     the hostname to the local network. Remove both live-only resolved drop-ins.
+#     Removing archiso.conf is not enough on its own: resolved's compiled-in
+#     default is ALSO MulticastDNS=yes (and LLMNR=yes), which is why
+#     maze-hardening >= 1.0.0-4 ships resolved.conf.d/zz-maze-privacy.conf
+#     (MulticastDNS=no, LLMNR=no) — that file stays. No DNS SERVER override is
+#     shipped on purpose: a global resolver broke VPN/DHCP split-DNS and Tor
+#     (see maze-hardening/PKGBUILD); DNS follows the connection.
 rm -f "${TARGET}/etc/systemd/resolved.conf.d/archiso.conf" 2>/dev/null || true
 rm -f "${TARGET}/etc/systemd/resolved.conf.d/maze-dns.conf" 2>/dev/null || true
+# 5f. LAN silence, belt and braces with maze-hardening.install (which already
+#     ran in the ISO build chroot and left its marker): passim (fwupd's LAN
+#     firmware-cache sharing daemon) socket-activates avahi-daemon, and the two
+#     together advertise the machine over mDNS. Mask both on the target.
+in_chroot systemctl mask passim.service avahi-daemon.socket avahi-daemon.service >/dev/null 2>&1 || true
 # NOTE: the live /home/maze leftover is purged EARLY by calamares-mount-api.sh
 # (before the Calamares `users` module runs), NOT here — deleting it at this
 # point would wipe the home of a real user who named THEIR OWN account 'maze'.
@@ -1108,6 +1111,14 @@ for home in "${TARGET}"/home/*; do
     # (gpasswd on a non-existent group) and maze-guard kept asking for root.
     in_chroot getent group maze >/dev/null 2>&1 || in_chroot groupadd -r maze >/dev/null 2>&1 || true
     in_chroot gpasswd -a "${user}" maze >/dev/null 2>&1 || true
+    # Same optional groups the live user gets in setup-live-user.sh: wireshark
+    # (packet capture without root — wireshark-qt ships on every install),
+    # kvm/libvirt (only exist once virtualisation is installed, then the user
+    # should not have to log out and back in to use it). Skipped when absent.
+    for _og in wireshark kvm libvirt; do
+        in_chroot getent group "${_og}" >/dev/null 2>&1 \
+            && in_chroot gpasswd -a "${user}" "${_og}" >/dev/null 2>&1 || true
+    done
     cp -an "${TARGET}/etc/skel/." "${home}/" 2>/dev/null || warn "skel copy to ${home} failed"
     # FORCE the Maze .zshrc over whatever the home already has. grml-zsh-config
     # ships its OWN /etc/skel/.zshrc, so Calamares seeds the home with grml's
@@ -1148,6 +1159,10 @@ EOF
     # cp -an above is no-clobber, so the installer pin survives here and must be
     # removed explicitly — otherwise the installed system keeps an installer icon.
     strip_installer_launcher "${user_appletsrc}"
+    # Make sure this user's default browser is Firefox (the home was seeded from
+    # skel before skel was patched, and the cp -an above is no-clobber).
+    set_default_browser "${home}/.config/mimeapps.list"
+    set_kde_browser     "${home}/.config/kdeglobals"
     chown -R "${owner_uid}:${owner_gid}" "${home}" 2>/dev/null || true
     # Private home: 700 (not world-readable). A desktop home holds keys, tokens
     # and history; a 755 home leaks all of it to every local account. (lynis
@@ -1173,6 +1188,58 @@ EOF
     in_chroot usermod -s /usr/bin/zsh "${user}" >/dev/null 2>&1 || true
 done
 
+# 3a-bis) Lock the root account -----------------------------------------------
+#
+# The live ISO ships root with an EMPTY password (`root::` in airootfs/etc/shadow)
+# so the live environment is usable, and Calamares is configured with
+# `setRootPassword: false`, so it never touches root on the target. unpackfs
+# copies /etc/shadow wholesale — which means, left alone, the installed system
+# keeps a root account that anyone at a TTY can log into by typing "root" and
+# pressing Enter. Nothing else in this script touched it.
+#
+# Locking is the right end state, not setting a password: Maze gives the first
+# user wheel/sudo, so root is never logged into directly. `passwd -l` prefixes
+# the hash with "!" — combined with an empty hash that leaves "!", which is a
+# valid "no login" marker.
+#
+# The recovery half of this is in maze-secureboot: sulogin refuses an account
+# with no usable password, so without a drop-in a locked root would also mean an
+# unreachable emergency shell. That package ships SULOGIN_FORCE=1 for
+# emergency.service and rescue.service, and the reasoning for why that is safe
+# on a sealed-cmdline system is written out there.
+log "Locking the root account (login is via the wheel user + sudo)"
+if in_chroot passwd -l root >/dev/null 2>&1; then
+    _root_state="$(in_chroot passwd -S root 2>/dev/null | awk '{print $2}' || true)"
+    case "${_root_state}" in
+        L|LK) log "root is locked" ;;
+        *)    log "root password status: ${_root_state:-unknown}" ;;
+    esac
+else
+    warn "passwd -l root failed; falling back to editing shadow directly"
+fi
+
+# `passwd -l` prefixes the existing hash with "!", and shadow-utils versions
+# differ in how they treat an EMPTY field — the exact case that arrives from the
+# live medium. The outcome here decides whether a stranger at a TTY is root, so
+# it is verified rather than assumed, and repaired directly if the tool did not
+# do it.
+_root_field="$(in_chroot awk -F: '$1=="root" {print $2}' /etc/shadow 2>/dev/null || true)"
+case "${_root_field}" in
+    ""|":")
+        warn "root still has an EMPTY password — locking it directly"
+        if in_chroot sed -i 's/^root::/root:!:/' /etc/shadow 2>/dev/null \
+           && [[ "$(in_chroot awk -F: '$1=="root" {print $2}' /etc/shadow 2>/dev/null)" == "!" ]]; then
+            log "root locked"
+        else
+            warn "COULD NOT LOCK ROOT. The installed system allows passwordless"
+            warn "root login at a TTY. Fix after first boot with: sudo passwd -l root"
+        fi
+        ;;
+    *)
+        log "root password field is set (locked or hashed)"
+        ;;
+esac
+
 # 3b) GPU: configure the NVIDIA proprietary driver if the installer added it ---
 NVIDIA_PARAMS=""
 if in_chroot pacman -Qq nvidia nvidia-dkms nvidia-open nvidia-open-dkms nvidia-lts 2>/dev/null | grep -q .; then
@@ -1182,8 +1249,9 @@ if in_chroot pacman -Qq nvidia nvidia-dkms nvidia-open nvidia-open-dkms nvidia-l
 # vendor-fbdev flicker) and GPU System Processor firmware for Turing+ cards.
 options nvidia_drm modeset=1 fbdev=1
 options nvidia NVreg_EnableGpuFirmware=1
-# Keep VRAM contents across suspend/hibernate so the desktop comes back without
-# corruption (works together with the nvidia-suspend/resume services below).
+# Keep VRAM contents across suspend so the desktop comes back without corruption
+# (works together with the nvidia-suspend/resume services below). Maze suspends
+# to RAM only — see the nvidia-hibernate note further down.
 options nvidia NVreg_PreserveVideoMemoryAllocations=1
 # Use the Page Attribute Table for memory mappings (better GPU throughput).
 options nvidia NVreg_UsePageAttributeTable=1
@@ -1191,16 +1259,77 @@ options nvidia NVreg_UsePageAttributeTable=1
 blacklist nouveau
 options nouveau modeset=0
 EOF
+    # NOTE: the nvidia modules are deliberately NOT forced into MODULES=() here.
+    #
+    # mkinitcpio bundles the firmware of every module it includes, and the nvidia
+    # modules drag in the WHOLE /lib/firmware/nvidia/ tree — the GSP blobs for every
+    # supported GPU generation, not just this machine's (~214 MB). Firmware ships as
+    # individually-zstd'd .bin.zst, so it does not recompress: it lands ~1:1 in the
+    # image and pushed the signed UKI to ~240 MB. That is paid on EVERY boot twice
+    # over — shim has to hash the whole binary for the Secure Boot signature check
+    # (measured: ~6 s in the "loader" phase) and the kernel then unpacks it — all of
+    # it BEFORE Plymouth or the LUKS prompt can appear.
+    #
+    # Nothing needed to MOUNT root lives on the GPU: root is LUKS + btrfs, driven by
+    # the encrypt/block/filesystems hooks. So nvidia is left out of the initramfs and
+    # loads normally from the real root, with `nvidia-drm.modeset=1` (set below) still
+    # giving KMS once it is up.
+    #
+    # NOTE the interaction with the `kms` HOOK (kept in HOOKS further down, step 4):
+    # `kms` pulls the DRM driver `autodetect` finds, which on an NVIDIA box before
+    # the proprietary driver is installed is NOUVEAU — and nouveau drags in the same
+    # /lib/firmware/nvidia/ tree this block avoids (measured on a Raptor Lake + MX550
+    # machine: 20 MB initramfs without `kms`, 138 MB with, of which 106 MB is that
+    # firmware). Step 4 now settles this per machine: when the panel is on the iGPU
+    # (every hybrid laptop) `kms` is dropped and only that iGPU driver goes into
+    # MODULES, so neither nouveau nor nvidia ever reaches the UKI. maze-gpu-driver
+    # no longer adds the nvidia modules to MODULES either — the driver loads from
+    # the real root, and nvidia-drm.modeset=1 gives KMS from that point on.
+    #
+    # Strip the modules idempotently so re-running the deploy on a system installed by
+    # an older Maze (which did add them) also shrinks its UKI.
     mkc="${TARGET}/etc/mkinitcpio.conf"
-    if [[ -f "${mkc}" ]] && ! grep -q 'nvidia' "${mkc}"; then
-        sed -i 's/^MODULES=(\(.*\))/MODULES=(\1 nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' "${mkc}" 2>/dev/null \
-            || warn "mkinitcpio MODULES (nvidia) edit failed"
+    if [[ -f "${mkc}" ]] && grep -qE '^MODULES=\(.*nvidia' "${mkc}"; then
+        # The trailing \?? also strips the OPTIONAL-module suffix maze-gpu-driver
+        # writes (`nvidia?`). Without it a re-deploy over a system that already ran
+        # maze-gpu-driver would remove the name but leave the '?' behind, giving
+        # MODULES=(? ? ? ?) — four entries mkinitcpio cannot resolve.
+        sed -i -E '/^MODULES=\(/ s/[[:space:]]*\bnvidia(_modeset|_uvm|_drm)?\b\??//g' "${mkc}" 2>/dev/null \
+            && log "NVIDIA: removed nvidia modules from initramfs MODULES (keeps the UKI small; driver loads from root)" \
+            || warn "mkinitcpio MODULES (nvidia) cleanup failed"
     fi
-    # Preserve-VRAM needs these to actually save/restore on sleep & hibernate.
-    in_chroot systemctl enable nvidia-suspend.service nvidia-hibernate.service nvidia-resume.service \
+    # Preserve-VRAM needs these to actually save/restore the framebuffer on sleep.
+    #
+    # nvidia-hibernate.service is deliberately NOT enabled: this system cannot
+    # hibernate and never could. partition.conf offers only "none" and "file" for
+    # swap (the RAM-sized swap PARTITION choice breaks the install on LUKS — see
+    # the note there), so Calamares' initcpiocfg never adds the `resume` hook,
+    # nothing puts `resume=` on the kernel cmdline, and the everyday swap is zram,
+    # which lives in RAM and can never hold a hibernation image. Enabling the unit
+    # only advertises a capability that is not there. Suspend-to-RAM, which does
+    # work, is covered by the two units below.
+    in_chroot systemctl enable nvidia-suspend.service nvidia-resume.service \
         >/dev/null 2>&1 || warn "could not enable nvidia suspend/resume services"
     NVIDIA_PARAMS=" nvidia-drm.modeset=1 nvidia-drm.fbdev=1"
 fi
+
+# 3c) Keyboard quirks — per machine, never globally --------------------------
+# Some Lenovo laptops need i8042.dumbkbd=1 (the kernel stops sending commands
+# to the internal keyboard; found and verified on the ThinkPad E16 Gen 1). It
+# is a workaround, not a default: on a healthy keyboard it disables the Caps
+# Lock LED and typematic-rate control, so it is keyed on the DMI product family
+# and must stay that way. i8042 is built into the Arch kernel, so this can only
+# be a kernel parameter — modprobe.d never sees it. This script runs on the
+# live medium, on the very hardware being installed, so /sys/class/dmi is the
+# target machine's.
+KBD_PARAMS=""
+_dmi_family="$(cat /sys/class/dmi/id/product_family 2>/dev/null || true)"
+case "${_dmi_family}" in
+    "ThinkPad E16 Gen 1")
+        log "Keyboard quirk for '${_dmi_family}': adding i8042.dumbkbd=1"
+        KBD_PARAMS=" i8042.dumbkbd=1"
+        ;;
+esac
 
 # 4) Plymouth boot splash --------------------------------------------------
 log "Configuring Plymouth"
@@ -1217,17 +1346,99 @@ if [[ "${_root_src_dev}" == /dev/mapper/* ]] && cryptsetup status "${_root_src_d
 fi
 
 if [[ -f "${mkconf}" ]]; then
+    # EARLY KMS. `kms` loads the DRM driver for the GPU `autodetect` actually found,
+    # inside the initramfs — so Plymouth and the LUKS passphrase box come up on the
+    # real GPU at native resolution, instead of on efifb/simpledrm and then flipping
+    # mode once root is mounted.
+    #
+    # This block used to REMOVE `kms` (Calamares' initcpiocfg adds it by default —
+    # see its main.py hooks list) to keep GPU firmware out of the UKI. Measured on a
+    # Raptor Lake + MX550 machine, same kernel, only HOOKS differing:
+    #
+    #     kms absent .......  20 MB initramfs
+    #     kms present ...... 138 MB initramfs
+    #
+    # and the +118 MB breaks down as i915 9.6 MB + xe 3.5 MB + nvidia 106 MB — i.e.
+    # ~90% of it is the GSP firmware tree nouveau pulls in. On Intel-only or AMD
+    # hardware `kms` costs ~11-30 MB, which is a fair price for a clean splash.
+    #
+    # Listing the drivers in MODULES instead is NOT a substitute: MODULES entries are
+    # added unconditionally, so `MODULES=(i915? xe? amdgpu? radeon?)` on an Intel-only
+    # box still dragged in amdgpu's firmware (measured: 31 MB -> 66 MB) for a GPU that
+    # is not there. `kms` is the hardware-adaptive mechanism, so `kms` is what we keep.
+    #
+    # That "nouveau shrinks by itself" reasoning turned out to be wrong in practice:
+    # maze-gpu-driver used to put the nvidia modules back into MODULES, and the
+    # proprietary driver's GSP blobs are even bigger (~214 MB) — so both GPU paths
+    # ended up with a 160-240 MB UKI. Measured on the same Raptor Lake + MX550
+    # machine (systemd-analyze, Secure Boot on): loader 6.9 s with the 161 MB UKI,
+    # 2.3 s with a 44 MB one, and the LUKS prompt up at ~2 s instead of ~4 s.
+    #
+    # So the rule is now driven by which GPU actually owns the panel. On every
+    # hybrid laptop that is the iGPU: the discrete GPU contributes nothing to the
+    # splash or to mounting root, so it has no business in the initramfs — it loads
+    # from the real root a few seconds later with all of its firmware available
+    # (verified: nouveau came up at 19 s with 2 GB VRAM, no errors). The driver is
+    # read from the boot_vga device, and ONLY that one module goes into MODULES —
+    # a single detected entry, not the unconditional list the note above warns
+    # about. `kms` is dropped in that case because it would re-add the dGPU.
+    #
+    # When the panel itself hangs off NVIDIA (no iGPU) there is no cheap option:
+    # `kms` stays so the splash still comes up on the real GPU, firmware included.
+    _boot_gpu_drv=""
+    for _pd in /sys/bus/pci/devices/*; do
+        [[ "$(cat "${_pd}/boot_vga" 2>/dev/null)" == "1" ]] || continue
+        _boot_gpu_drv="$(basename "$(readlink -f "${_pd}/driver" 2>/dev/null)" 2>/dev/null)"
+        break
+    done
+    if [[ -z "${_boot_gpu_drv}" ]]; then
+        # No boot_vga flag (some firmware never sets it): fall back to the first
+        # DRM card that has a driver bound.
+        for _cd in /sys/class/drm/card[0-9]/device; do
+            _boot_gpu_drv="$(basename "$(readlink -f "${_cd}/driver" 2>/dev/null)" 2>/dev/null)"
+            [[ -n "${_boot_gpu_drv}" ]] && break
+        done
+    fi
+    case "${_boot_gpu_drv}" in
+        i915|xe|amdgpu|radeon)
+            log "Early KMS: panel is on ${_boot_gpu_drv} — MODULES=(${_boot_gpu_drv}), no 'kms' hook (keeps dGPU firmware out of the UKI)"
+            if ! grep -qE "^[[:space:]]*MODULES=\([^)]*\b${_boot_gpu_drv}\b" "${mkconf}"; then
+                sed -i -E "/^[[:space:]]*MODULES=\(/ s/^([[:space:]]*MODULES=\()[[:space:]]*/\1${_boot_gpu_drv} /; s/^([[:space:]]*MODULES=\(${_boot_gpu_drv}) \)/\1)/" "${mkconf}" 2>/dev/null \
+                    || warn "mkinitcpio MODULES (${_boot_gpu_drv}) edit failed"
+            fi
+            # Also drop any dGPU entries an older Maze / maze-gpu-driver left behind.
+            sed -i -E '/^[[:space:]]*MODULES=/ s/[[:space:]]*\b(nouveau|nvidia(_modeset|_uvm|_drm)?)\b\??//g' "${mkconf}" 2>/dev/null || true
+            sed -i -E '/^[[:space:]]*HOOKS=/ s/[[:space:]]*\bkms\b//' "${mkconf}" 2>/dev/null \
+                || warn "mkinitcpio HOOKS (kms) removal failed"
+            ;;
+        *)
+            log "Early KMS: panel driver is '${_boot_gpu_drv:-unknown}' — keeping the 'kms' hook"
+            if ! grep -qE '^[[:space:]]*HOOKS=\([^)]*\bkms\b' "${mkconf}"; then
+                # Canonical Arch position: right after `microcode`, before `modconf`.
+                if grep -qE '^[[:space:]]*HOOKS=\([^)]*\bmodconf\b' "${mkconf}"; then
+                    sed -i -E '/^[[:space:]]*HOOKS=/ s/\bmodconf\b/kms modconf/' "${mkconf}" 2>/dev/null \
+                        && log "added 'kms' hook (early KMS: splash and LUKS prompt on the real GPU)" \
+                        || warn "mkinitcpio HOOKS (kms) insert failed"
+                else
+                    warn "mkinitcpio HOOKS has no 'modconf' anchor — 'kms' not inserted, early KMS is OFF"
+                fi
+            fi
+            ;;
+    esac
+
     if ! grep -q 'plymouth' "${mkconf}"; then
-        # Not in hooks yet — add right after kms (GPU up = clean splash), or after udev.
-        if grep -qE 'HOOKS=\([^)]*\bkms\b' "${mkconf}"; then
-            sed -i -E 's/(HOOKS=\([^)]*\bkms\b)/\1 plymouth/' "${mkconf}" 2>/dev/null || warn "mkinitcpio HOOKS edit failed"
+        # Fallback only — Calamares' initcpiocfg already appends plymouth in the right
+        # place when it detects it. plymouth must come AFTER `kms` (it needs the DRM
+        # driver to draw on the real GPU) and BEFORE `encrypt` (which calls
+        # `plymouth ask-for-password` for the passphrase box). Anchor on `encrypt`,
+        # which satisfies both; only fall back to the udev position if that is absent.
+        if grep -qE '^[[:space:]]*HOOKS=\([^)]*\bencrypt\b' "${mkconf}"; then
+            sed -i -E '/^[[:space:]]*HOOKS=/ s/\bencrypt\b/plymouth encrypt/' "${mkconf}" 2>/dev/null \
+                || warn "mkinitcpio HOOKS (plymouth) edit failed"
         else
-            sed -i 's/\(HOOKS=([^)]*udev\)/\1 plymouth/' "${mkconf}" 2>/dev/null || warn "mkinitcpio HOOKS edit failed"
+            sed -i -E '/^[[:space:]]*HOOKS=/ s/\budev\b/udev plymouth/' "${mkconf}" 2>/dev/null \
+                || warn "mkinitcpio HOOKS (plymouth) edit failed"
         fi
-    elif grep -qE '\bkms\b' "${mkconf}" && ! grep -qE '\bkms\b[[:space:]]+\bplymouth\b' "${mkconf}"; then
-        # Plymouth already in hooks but not right after kms — reposition it.
-        sed -i -E 's/[[:space:]]*\bplymouth\b//' "${mkconf}" 2>/dev/null || true
-        sed -i -E 's/(HOOKS=\([^)]*\bkms\b)/\1 plymouth/' "${mkconf}" 2>/dev/null || warn "mkinitcpio plymouth reposition failed"
     fi
     # LUKS passphrase prompt — THE thing that makes the box appear. The busybox
     # `encrypt` hook is what stops the initramfs and calls `plymouth
@@ -1240,7 +1451,7 @@ if [[ -f "${mkconf}" ]]; then
     # any single layer — for a LUKS root, force `encrypt` (and `keyboard`, so the
     # passphrase can actually be typed) into HOOKS here, idempotently.
     #
-    # `plymouth` is already inserted right after `kms` above — well before the
+    # `plymouth` is already inserted right after `udev` above — well before the
     # late `encrypt` hook — so plymouthd is up when the prompt fires. (There is NO
     # `plymouth-encrypt` hook in current mkinitcpio; only `encrypt`/`sd-encrypt`,
     # so swapping to it would make `mkinitcpio -P` fail and leave root unbootable.)
@@ -1273,20 +1484,23 @@ fi
 # installed system builds a fast-to-read, fast-to-decompress image (like Arch).
 rm -f "${TARGET}/etc/mkinitcpio.conf.d/archiso.conf" 2>/dev/null || true
 if [[ -f "${mkconf}" ]]; then
-    if grep -qE '^[[:space:]]*#?[[:space:]]*COMPRESSION=' "${mkconf}"; then
-        sed -i -E 's|^[[:space:]]*#?[[:space:]]*COMPRESSION=.*|COMPRESSION="zstd"|' "${mkconf}" 2>/dev/null || true
-    else
-        printf 'COMPRESSION="zstd"\n' >> "${mkconf}"
-    fi
+    # Delete every COMPRESSION line — active OR commented — then write exactly one.
+    # (Rewriting matches in place instead would turn each of the stock config's
+    # commented examples — #COMPRESSION="gzip", "bzip2", "lzma", "xz", "lzop", "lz4",
+    # "zstd" — into its own ACTIVE COMPRESSION="zstd" line, leaving ~7 duplicates in
+    # the file. mkinitcpio honours the last one, so the build was still zstd, but the
+    # config was a mess and re-running the deploy kept adding to it.)
+    sed -i -E '/^[[:space:]]*#?[[:space:]]*COMPRESSION=/d' "${mkconf}" 2>/dev/null || true
+    printf 'COMPRESSION="zstd"\n' >> "${mkconf}"
     # Drop any xz-style COMPRESSION_OPTIONS that would no longer apply to zstd.
     sed -i -E 's|^[[:space:]]*COMPRESSION_OPTIONS=.*|COMPRESSION_OPTIONS=()|' "${mkconf}" 2>/dev/null || true
 fi
 # 5) Kernel command line — must be written BEFORE mkinitcpio so UKI picks it up.
-log "Adding kernel parameters (quiet splash bgrt_disable + AppArmor${NVIDIA_PARAMS:+ + NVIDIA})"
+log "Adding kernel parameters (quiet splash bgrt_disable + AppArmor${NVIDIA_PARAMS:+ + NVIDIA}${KBD_PARAMS:+ + keyboard quirk})"
 # The full set of params Maze wants on every boot. NONE of these is root=/
 # rootflags=/rootfstype= — those belong to the installer and must never be
 # duplicated by us.
-EXTRA_PARAMS="quiet splash bgrt_disable logo.nologo lsm=landlock,lockdown,yama,integrity,apparmor,bpf apparmor=1 security=apparmor${NVIDIA_PARAMS}"
+EXTRA_PARAMS="quiet splash bgrt_disable logo.nologo lsm=landlock,lockdown,yama,integrity,apparmor,bpf apparmor=1 security=apparmor${NVIDIA_PARAMS}${KBD_PARAMS}"
 
 # /etc/kernel/cmdline is the authoritative source for UKI builds. Calamares'
 # bootloader module already wrote it with root=, rootflags=, etc. We APPEND
@@ -1308,6 +1522,60 @@ for _p in ${EXTRA_PARAMS}; do
     done
     [[ "${_present}" -eq 1 ]] || _new_cmdline="${_new_cmdline} ${_p}"
 done
+# TRIM through dm-crypt, the way that needs NO passphrase.
+#
+# The busybox `encrypt` hook (the one this install uses) reads
+# `cryptdevice=<device>:<name>[:<options>]` and turns `allow-discards` in that
+# comma-separated third field into `cryptsetup open --allow-discards`
+# (/usr/lib/initcpio/hooks/encrypt). Setting it here means every boot unlocks
+# root with discards enabled.
+#
+# This is the primary mechanism precisely because the alternative — persisting
+# the flag into the LUKS2 header with `cryptsetup --persistent refresh` further
+# down — needs the passphrase (cryptsetup-refresh(8): "Mandatory parameters are
+# identical to those of an open action"), and the installer deliberately does
+# not keep it. So that call fails on a normal install and used to leave TRIM
+# simply not working, with nothing but a warning. Without discards reaching the
+# SSD, a DRAM-less QLC drive never reclaims its free-block pool and large writes
+# collapse into multi-second stalls.
+MAZE_LUKS_DISCARD_CMDLINE=0
+if [[ "${ROOT_IS_LUKS}" -eq 1 ]]; then
+    _cmdline_out=""
+    for _e in ${_new_cmdline}; do
+        if [[ "${_e}" == cryptdevice=* ]]; then
+            _val="${_e#cryptdevice=}"
+            # Field split matches the hook's `IFS=: read cryptdev cryptname
+            # cryptoptions`: first colon ends the device, second ends the name,
+            # everything after that is the options list.
+            _cd_dev="${_val%%:*}"
+            _cd_rest="${_val#*:}"
+            if [[ "${_cd_rest}" == "${_val}" ]]; then
+                # No ":name" at all — not a form the hook understands. Leave it
+                # exactly as Calamares wrote it rather than guessing.
+                _cmdline_out="${_cmdline_out} ${_e}"
+                continue
+            fi
+            _cd_name="${_cd_rest%%:*}"
+            _cd_opts=""
+            [[ "${_cd_rest}" == *:* ]] && _cd_opts="${_cd_rest#*:}"
+            case ",${_cd_opts}," in
+                *,allow-discards,*|*,discard,*) ;;   # already requested
+                *) _cd_opts="${_cd_opts:+${_cd_opts},}allow-discards" ;;
+            esac
+            _cmdline_out="${_cmdline_out} cryptdevice=${_cd_dev}:${_cd_name}:${_cd_opts}"
+            MAZE_LUKS_DISCARD_CMDLINE=1
+        else
+            _cmdline_out="${_cmdline_out} ${_e}"
+        fi
+    done
+    if [[ "${MAZE_LUKS_DISCARD_CMDLINE}" -eq 1 ]]; then
+        _new_cmdline="${_cmdline_out# }"
+        log "LUKS: allow-discards added to cryptdevice= on the kernel cmdline (TRIM pass-through, no passphrase needed)"
+    else
+        warn "LUKS: no cryptdevice= token on the kernel cmdline — cannot enable TRIM pass-through there"
+    fi
+fi
+
 printf '%s\n' "${_new_cmdline}" > "${TARGET}/etc/kernel/cmdline"
 
 # For systemd-boot/GRUB/Limine config files we append ONLY the extra params
@@ -1389,18 +1657,29 @@ if is_uefi; then
     done
 fi
 if [[ "${ROOT_IS_LUKS}" -eq 1 ]]; then
-    _enc_ok=0
-    for _img in "${TARGET}"/boot/initramfs-*.img; do
-        [[ -f "${_img}" ]] || continue
-        case "${_img}" in *fallback*) continue ;; esac
-        if in_chroot lsinitcpio -a "/boot/$(basename "${_img}")" 2>/dev/null | grep -qw encrypt; then
-            _enc_ok=1
-            log "LUKS: verified 'encrypt' hook in $(basename "${_img}") — the passphrase box will appear at boot"
-        else
-            warn "LUKS: 'encrypt' hook MISSING from $(basename "${_img}") — root will not unlock / no password box. HOOKS=$(grep -E '^HOOKS=' "${mkconf}" 2>/dev/null)"
-        fi
+    # Verify the passphrase prompt will actually appear. This used to iterate over
+    # ${TARGET}/boot/initramfs-*.img, but /etc/kernel/install.conf ships layout=uki:
+    # kernel-install writes a UKI to $ESP/EFI/Linux/ and NO loose initramfs image is
+    # ever produced, so that loop matched nothing and every install ended on the
+    # "no plain image to verify" warning — the check never actually ran.
+    #
+    # HOOKS in mkinitcpio.conf is what drives the build, so check that first (it is
+    # authoritative and always available), then confirm a UKI was really produced.
+    if grep -qE '^[[:space:]]*HOOKS=\([^)]*\bencrypt\b' "${mkconf}" 2>/dev/null; then
+        log "LUKS: 'encrypt' hook present in HOOKS — the passphrase box will appear at boot"
+    else
+        warn "LUKS: 'encrypt' hook MISSING from HOOKS — root will not unlock / no password box. HOOKS=$(grep -E '^HOOKS=' "${mkconf}" 2>/dev/null)"
+    fi
+    _uki_found=0
+    for _esp_dir in "${TARGET}/efi/EFI/Linux" "${TARGET}/boot/EFI/Linux"; do
+        for _uki in "${_esp_dir}"/*.efi; do
+            [[ -f "${_uki}" ]] || continue
+            _uki_found=1
+            log "LUKS: UKI present — $(basename "${_uki}") ($(du -h "${_uki}" 2>/dev/null | cut -f1))"
+        done
     done
-    [[ "${_enc_ok}" -eq 0 ]] && warn "LUKS: no plain /boot/initramfs-*.img to verify; ensure HOOKS in ${mkconf} contains 'encrypt'"
+    [[ "${_uki_found}" -eq 0 ]] \
+        && warn "LUKS: no UKI found under EFI/Linux on the ESP — kernel-install may not have run"
 fi
 
 # No systemd-boot BLS entries to patch: /etc/kernel/install.conf ships
@@ -1468,7 +1747,23 @@ if [[ "${_root_src}" == /dev/mapper/* ]]; then
         if cryptsetup --allow-discards --persistent refresh "${_luks_name}" >/dev/null 2>&1; then
             log "LUKS: persisted allow-discards on ${_luks_name} (TRIM pass-through enabled)"
         else
-            warn "LUKS: could not persist allow-discards on ${_luks_name}"
+            # Expected, and not a bug: per cryptsetup-refresh(8) the "mandatory
+            # parameters are identical to those of an open action", i.e. refresh
+            # wants the passphrase, which the installer deliberately does not
+            # keep (and --persistent is LUKS2-only). TRIM is already handled by
+            # the allow-discards flag written onto the kernel cmdline earlier, so
+            # this is only the belt-and-braces header flag — report accordingly
+            # instead of raising an alarm about something that is working.
+            if [[ "${MAZE_LUKS_DISCARD_CMDLINE:-0}" -eq 1 ]]; then
+                log "LUKS: header flag not persisted on ${_luks_name} (needs the passphrase) — not a problem, TRIM comes from the cmdline allow-discards."
+                log "      To also store it in the LUKS2 header, run once on the installed system:"
+                log "          sudo cryptsetup --allow-discards --persistent refresh ${_luks_name}"
+            else
+                warn "LUKS: TRIM pass-through is NOT enabled on ${_luks_name} — the cmdline route did not apply either."
+                warn "      Run this once on the installed system:"
+                warn "          sudo cryptsetup --allow-discards --persistent refresh ${_luks_name}"
+                warn "      Verify with: sudo cryptsetup luksDump <device> | grep -i flags"
+            fi
         fi
     fi
 fi
@@ -1478,34 +1773,31 @@ fi
 # if the user kept them in the installer's Security section (empty = all).
 # zram-generator drives the compressed RAM swap configured above; install it on
 # the target if we can reach the network (best-effort, skipped offline).
-in_chroot pacman -S --needed --noconfirm zram-generator >/dev/null 2>&1 \
-    || warn "zram-generator not installed (offline?); /etc/systemd/zram-generator.conf is in place for later"
-
-# Virtualization stack — deliberately NOT on the live ISO (see packages.x86_64:
-# qemu-full alone added ~2 GB of foreign-arch emulators/firmware to the image),
-# so it is installed HERE, on the target, over the network. qemu-desktop is the
-# x86/KVM subset virt-manager actually uses. Gated on the Extras packagechooser
-# selection: skipped if the user deselected "qemu-virt". Best-effort: offline
-# installs just skip it (libvirtd enable below then no-ops) and the user can
-# install it later.
-if [[ -z "${EXTRAS_CSV}" || ",${EXTRAS_CSV}," == *",qemu-virt,"* ]]; then
-    log "Installing virtualization stack on the target (qemu-desktop + libvirt + virt-manager)"
-    if in_chroot pacman -S --needed --noconfirm qemu-desktop libvirt virt-manager edk2-ovmf vde2 dnsmasq >/dev/null 2>&1; then
-        for _h in "${TARGET}"/home/*; do
-            [[ -d "${_h}" ]] || continue
-            _u="$(basename "${_h}")"
-            in_chroot id "${_u}" >/dev/null 2>&1 || continue
-            for _g in libvirt kvm; do
-                in_chroot getent group "${_g}" >/dev/null 2>&1 \
-                    && in_chroot usermod -aG "${_g}" "${_u}" >/dev/null 2>&1 || true
-            done
-        done
-    else
-        warn "virtualization stack not installed (offline?); install later with: pacman -S qemu-desktop libvirt virt-manager edk2-ovmf"
-    fi
-else
-    log "QEMU virtualization deselected — skipping"
+# zram-generator is listed in packages.x86_64, so unpackfs has already put it on
+# the target — check before reaching for the network. The old unconditional
+# `pacman -S` ran BEFORE the target keyring is initialised (step 8b, further
+# down), so it failed on a perfectly fine install and warned "offline?", which
+# is exactly the wrong thing to send someone chasing. Only warn when the package
+# is genuinely absent.
+if ! in_chroot pacman -Qq zram-generator >/dev/null 2>&1; then
+    in_chroot pacman -S --needed --noconfirm zram-generator >/dev/null 2>&1 \
+        || warn "zram-generator is not installed and could not be fetched; /etc/systemd/zram-generator.conf is in place for later"
 fi
+
+# Virtualization is NOT set up at install time — by design, and no longer even
+# attempted here. The stack was ~2 GB (qemu-full alone) so it never went on the
+# live ISO, and installing it from the target chroot needs a working network in
+# the middle of an otherwise offline install. Maze ships `maze-install-vmware`
+# (maze-tools) instead: the user runs it once, post-install, and paru builds
+# VMware Workstation + open-vm-tools and enables its services. Anyone who wants
+# the KVM stack instead is one command away:
+#     sudo pacman -S qemu-desktop libvirt virt-manager edk2-ovmf
+#
+# The old block here was gated on the Extras packagechooser selection, but that
+# page was removed and EXTRAS_CSV is hardcoded to "none" at the top of this
+# script — so the gate could never open and the code (plus the matching
+# `systemctl enable libvirtd`) was dead on every single install. Removed rather
+# than left to look like a feature that runs.
 
 # VMware is no longer installed here — the user runs `maze-install-vmware`
 # (maze-tools) on demand, which pulls vmware-workstation + open-vm-tools via paru.
@@ -1516,10 +1808,6 @@ for svc in ollama acpid power-profiles-daemon smartd fstrim.timer bluetooth cups
            maze-guardd.service maze-sentinel-setup.service maze-sentinel.service; do
     in_chroot systemctl enable "${svc}" >/dev/null 2>&1 || true
 done
-# libvirtd only makes sense when the virtualization stack was installed.
-if [[ -z "${EXTRAS_CSV}" || ",${EXTRAS_CSV}," == *",qemu-virt,"* ]]; then
-    in_chroot systemctl enable libvirtd >/dev/null 2>&1 || true
-fi
 
 # Disable LIVE-only services that unpackfs carried over but must NOT run on an
 # installed desktop. sshd is the important one: the live ISO enables it for
@@ -1528,14 +1816,23 @@ fi
 # (The Maze sshd hardening drop-in stays in place, so if the user enables sshd
 # later it is already hardened.) The VM guest agents are harmless on real
 # hardware but pointless to keep enabled.
-log "Disabling live-only services on the target (sshd, VM guest agents)"
+#
+# cloud-init belongs in this list, not the boot-speed one below: on bare metal
+# its own generator (cloud-init-generator) checks ds-identify and never even
+# pulls in cloud-init.target, so it costs one shell script per boot and nothing
+# else — but on a VM (VMware OVF, a NoCloud seed) ds-identify CAN find a
+# datasource, and cloud-init is designed to rewrite the hostname, network config
+# and user accounts of whatever it boots into. That is exactly the kind of
+# live-medium behaviour that must not reach an installed desktop.
+log "Disabling live-only services on the target (sshd, VM guest agents, cloud-init)"
 # choose-mirror + livecd-talk are condition-gated (kernel cmdline) so they never
 # actually run on the target, but disable them anyway so `systemctl` output on
 # the installed system carries no live-medium leftovers.
 for svc in sshd vboxservice \
            hv_kvp_daemon hv_vss_daemon hv_fcopy_daemon \
            vmtoolsd vmware-vmblock-fuse \
-           choose-mirror livecd-talk; do
+           choose-mirror livecd-talk \
+           cloud-init-local cloud-init-network cloud-init-main cloud-config cloud-final; do
     in_chroot systemctl disable "${svc}" >/dev/null 2>&1 || true
 done
 
@@ -1602,8 +1899,16 @@ else
 fi
 
 if sec_selected firewalld; then
-    in_chroot firewall-offline-cmd --add-service=ssh        >/dev/null 2>&1 || true
-    in_chroot firewall-offline-cmd --add-service=kdeconnect >/dev/null 2>&1 || true
+    in_chroot firewall-offline-cmd --add-service=ssh          >/dev/null 2>&1 || true
+    in_chroot firewall-offline-cmd --add-service=kdeconnect   >/dev/null 2>&1 || true
+    # maze-connect (TCP+UDP 38271) — BACKSTOP only. Owning this rule is the
+    # maze-connect package's job and its scriptlet does it properly now; this line
+    # exists because the failure mode is silent (the app runs, shows its address,
+    # and simply never links) and the rule has to survive a long chain to get here:
+    # scriptlet in the ISO's pacstrap chroot -> zone file in the airootfs ->
+    # unpackfs copy. Re-adding it is idempotent and costs nothing. Referenced by
+    # SERVICE NAME, so a port change in maze-connect's XML needs no edit here.
+    in_chroot firewall-offline-cmd --add-service=maze-connect >/dev/null 2>&1 || true
 fi
 
 # 7) pacman tuning on the installed system (match the live medium) ---------
@@ -1641,7 +1946,7 @@ fi
 # The live ISO's pacman.conf carries a [maze-aur] repo whose Server is a file://
 # path on the BUILD host (…/MazeLinux/localrepo). On the installed target that
 # path does not exist, so the entry is dead weight — but worse, it keeps shadowing
-# the curated third-party AUR apps (brave-origin-bin, upscayl-bin, joplin-bin,
+# the curated third-party AUR apps (upscayl-bin, joplin-bin,
 # session-desktop-bin, claude-code, paru, …): while those names still resolve to a
 # sync repo, pacman treats them as native packages and `paru -Syu` — which only
 # reconciles *foreign* (`pacman -Qm`) packages against the AUR — never offers their
@@ -1650,7 +1955,14 @@ fi
 tconf="${TARGET}/etc/pacman.conf"
 if [[ -f "${tconf}" ]] && grep -q '^\[maze-aur\]' "${tconf}"; then
     log "Removing build-only [maze-aur] localrepo from target pacman.conf"
-    sed -i '/^\[maze-aur\]/,/^Server/d' "${tconf}" 2>/dev/null || true
+    # Bounded to the section: everything from [maze-aur] up to (not including)
+    # the next [section] header. The old `/^\[maze-aur\]/,/^Server/d` range
+    # relied on a `Server` line existing inside it — with no match it would have
+    # deleted to END OF FILE, taking [core]/[extra]/[multilib] with it.
+    awk '/^\[maze-aur\]/{skip=1; next} /^\[/{skip=0} !skip' "${tconf}" \
+        > "${tconf}.maze.tmp" 2>/dev/null \
+        && mv -f "${tconf}.maze.tmp" "${tconf}" \
+        || { rm -f "${tconf}.maze.tmp" 2>/dev/null; warn "could not strip [maze-aur] from target pacman.conf"; }
 fi
 
 # 8) Strip any STRAY BlackArch config inherited from the live medium ---------
@@ -1667,7 +1979,13 @@ fi
 tconf="${TARGET}/etc/pacman.conf"
 if [[ -f "${tconf}" ]] && grep -q '^\[blackarch\]' "${tconf}"; then
     log "Removing stray BlackArch repo from target pacman.conf"
-    sed -i '/^\[blackarch\]/,/^Include.*blackarch/d' "${tconf}" 2>/dev/null || true
+    # Bounded the same way as [maze-aur] above — the old range ended on
+    # /^Include.*blackarch/, so a section written with `Server =` instead would
+    # have deleted the rest of pacman.conf.
+    awk '/^\[blackarch\]/{skip=1; next} /^\[/{skip=0} !skip' "${tconf}" \
+        > "${tconf}.maze.tmp" 2>/dev/null \
+        && mv -f "${tconf}.maze.tmp" "${tconf}" \
+        || { rm -f "${tconf}.maze.tmp" 2>/dev/null; warn "could not strip [blackarch] from target pacman.conf"; }
 fi
 rm -f "${TARGET}/etc/pacman.d/blackarch-mirrorlist" 2>/dev/null || true
 
@@ -1688,19 +2006,54 @@ in_chroot gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || t
 # 10) Install Maze's own applications from the [mazelinux] repo (fast, reliable).
 install_maze_repo_apps
 
-# entropy-shield.install tries to auto-add the installing user to the
-# 'entropy-shield' group via $SUDO_USER/logname, and maze.install's
-# _setup_group() does not even try (it just prints a manual "sudo usermod"
-# instruction). Neither works here: pacman runs inside a non-interactive
-# arch-chroot (install_maze_repo_apps -> in_chroot pacman -S), so there is no
-# SUDO_USER/logname/tty session to detect the desktop user from. Same class of
-# bug as the libvirt/kvm fix above: fix it the same way, after the packages
-# (and their groups) exist.
+# THE REAL GAP, and it is not about groups at all.
+#
+# unpackfs copies the live filesystem onto the target — including
+# /var/lib/pacman — so every Maze app arrives already "installed" as far as the
+# target's package database is concerned. install_maze_repo_apps then runs
+# `pacman -S --needed`, which correctly skips them all, and NOT ONE of their
+# .install scriptlets ever executes against this machine.
+#
+# Most of what those scriptlets do survives the copy (files, venvs, units), but
+# two things cannot: the users/groups declared in sysusers.d, and the ownership
+# and modes declared in tmpfiles.d. maze-cloak is the clearest casualty — it
+# declares `g maze -` and `d /etc/maze-cloak 0775 root maze`, so on a fresh
+# install the group may not exist and its config directory is root:root, and the
+# app fails with permission errors until the user reinstalls it by hand.
+#
+# systemd applies both at boot, but the group fixup below runs NOW and needs the
+# groups to already exist, so apply them here first. Both tools are declarative
+# and idempotent — running them early costs nothing and changes nothing that is
+# already correct.
+in_chroot systemd-sysusers >/dev/null 2>&1 \
+    || warn "systemd-sysusers failed on the target; app groups may be missing"
+in_chroot systemd-tmpfiles --create >/dev/null 2>&1 \
+    || warn "systemd-tmpfiles --create failed on the target; app config dirs may have wrong ownership"
+
+# Now the group memberships. The app scriptlets try to add "the installing user"
+# via $SUDO_USER/logname, which cannot work from a non-interactive arch-chroot:
+# there is no sudo session and no tty to detect a desktop user from. Do it here,
+# where the real accounts exist.
+#
+# Derived from what the packages actually declare rather than a hardcoded pair,
+# so a new Maze app that ships a sysusers.d group is covered the day it lands.
+_maze_groups="$(in_chroot sh -c '
+    for f in /usr/lib/sysusers.d/*.conf; do
+        case "$f" in
+            */maze*|*/entropy*|*/qlam*|*/haze*|*/sentin*) ;;
+            *) continue ;;
+        esac
+        [ -r "$f" ] || continue
+        awk "/^g /{print \$2}" "$f"
+    done' 2>/dev/null | sort -u)"
+[[ -n "${_maze_groups}" ]] || _maze_groups="entropy-shield maze"
+log "Maze app groups: $(echo ${_maze_groups} | tr '\n' ' ')"
+
 for _h in "${TARGET}"/home/*; do
     [[ -d "${_h}" ]] || continue
     _u="$(basename "${_h}")"
     in_chroot id "${_u}" >/dev/null 2>&1 || continue
-    for _g in entropy-shield maze; do
+    for _g in ${_maze_groups}; do
         in_chroot getent group "${_g}" >/dev/null 2>&1 \
             && in_chroot usermod -aG "${_g}" "${_u}" >/dev/null 2>&1 || true
     done
@@ -1710,6 +2063,14 @@ done
 #     done last so everything above is guaranteed to be applied even if this
 #     struggles).
 install_aur_packages
+
+# SECURITY: belt-and-braces removal of the build-time NOPASSWD sudoers. The
+# function deletes it itself and clears its EXIT trap; this line is what covers
+# the case where the function returned early or its cleanup did not run.
+rm -f "${TARGET}/etc/sudoers.d/99-maze-build" 2>/dev/null || true
+if [[ -e "${TARGET}/etc/sudoers.d/99-maze-build" ]]; then
+    warn "SECURITY: could not remove ${TARGET}/etc/sudoers.d/99-maze-build — delete it by hand before first boot"
+fi
 
 # 12) FINAL Secure Boot re-sign. The AUR/app phase can regenerate the initramfs
 # AFTER the initial signing (e.g. an nvidia or mkinitcpio pull). Force kernel-install
@@ -1727,7 +2088,7 @@ if [[ -n "${MAZE_SB_ESP}" ]]; then
             in_chroot kernel-install add "${_krel}" "/usr/lib/modules/${_krel}/vmlinuz" \
                 >/dev/null 2>&1 || warn "Secure Boot: final kernel-install add failed for ${_krel} (UKI may be stale)"
         done
-        in_chroot /usr/local/bin/maze-sb-sign --force-bootloader "${MAZE_SB_ESP}" \
+        in_chroot /usr/bin/maze-sb-sign --force-bootloader "${MAZE_SB_ESP}" \
             || warn "Secure Boot: final re-sign reported problems"
     fi
 fi
@@ -1760,6 +2121,78 @@ if [[ -n "${MAZE_SB_ESP}" ]]; then
     fi
     if [[ "${_sb_ok}" -eq 1 ]] && ! sbverify --cert "${_sb_crt}" "${_grub}" >/dev/null 2>&1; then
         _sb_ok=0; _sb_reason="grubx64.efi exists but does NOT verify against the MOK certificate"
+    fi
+
+    # --- Does grubx64.efi boot the kernel that is actually installed? --------
+    # Every check above can pass on a machine that will not boot at all: a
+    # perfectly MOK-signed grubx64.efi built from an OLD kernel's UKI verifies
+    # fine, but the kernel inside it has no /usr/lib/modules directory on disk,
+    # so not one module loads — vfat included, which is why /boot cannot even be
+    # mounted afterwards to work out what happened. Signature validity and boot
+    # validity are different questions, and only the first was ever asked here.
+    #
+    # This failure is also strictly worse than a signing failure: turning Secure
+    # Boot off does not rescue it, so it gets its own message.
+    _kver_installed="$(
+        for _d in "${TARGET}"/usr/lib/modules/*/; do
+            [[ -f "${_d}vmlinuz" ]] || continue
+            _d="${_d%/}"; printf '%s\n' "${_d##*/}"
+        done | sort -V | tail -1
+    )"
+    _grub_kver=""
+    if [[ -f "${_grub}" ]]; then
+        _grub_kver="$(objcopy -O binary --only-section=.uname "${_grub}" /dev/stdout 2>/dev/null \
+                        | tr -d '\0' | tr -d '[:space:]')"
+        if [[ -z "${_grub_kver}" ]]; then
+            _grub_kver="$(grep -aoE '[0-9]+\.[0-9]+\.[0-9]+-arch[0-9]+-[0-9]+' "${_grub}" 2>/dev/null \
+                            | sort -u | head -1)"
+        fi
+    fi
+
+    if [[ -z "${_kver_installed}" || -z "${_grub_kver}" ]]; then
+        warn "Boot check: could not compare grubx64.efi against the installed kernel (skipped)"
+    elif [[ "${_grub_kver}" == "${_kver_installed}" ]]; then
+        log "Boot check: grubx64.efi boots ${_grub_kver} — matches the installed kernel"
+    elif [[ -d "${TARGET}/usr/lib/modules/${_grub_kver}" ]]; then
+        # Mismatched, but the kernel it boots IS installed — the machine comes up,
+        # just on an older kernel than the one this install put down. Worth saying,
+        # not worth alarming about.
+        warn "Boot check: grubx64.efi boots ${_grub_kver}, but ${_kver_installed} is also installed."
+        warn "  The system will boot (that kernel's modules are present), just not on the newest kernel."
+        warn "  To move it forward: kernel-install add ${_kver_installed} /usr/lib/modules/${_kver_installed}/vmlinuz"
+    else
+        warn "=================================================================="
+        warn "BOOT CHECK FAILED — this install will NOT boot."
+        warn "  grubx64.efi boots kernel : ${_grub_kver}"
+        warn "  kernel installed on disk : ${_kver_installed}"
+        warn "  ${_grub_kver} has NO modules on disk — nothing will load, not even vfat."
+        warn "Turning Secure Boot OFF does NOT help; the boot image itself is wrong."
+        warn "Fix from a live/chroot environment:"
+        warn "  kernel-install add ${_kver_installed} /usr/lib/modules/${_kver_installed}/vmlinuz"
+        warn "  maze-sb-sign ${MAZE_SB_ESP} --force-bootloader"
+        warn "=================================================================="
+        install -Dm644 /dev/stdin "${TARGET}/var/lib/maze-secureboot/BOOT-STATUS.txt" <<BOOTSTATUS
+Maze Linux — boot image does NOT match the installed kernel
+=============================================================
+
+  grubx64.efi boots kernel : ${_grub_kver}
+  kernel installed on disk : ${_kver_installed}
+
+The ESP is carrying a boot image for a kernel that is not the one installed.
+That kernel's modules are not on disk, so nothing loads at boot — including
+vfat, which is why /boot cannot be mounted to investigate. Disabling Secure
+Boot does NOT work around this.
+
+Boot the live ISO, unlock and mount the install, chroot in, then run:
+
+    kernel-install add ${_kver_installed} /usr/lib/modules/${_kver_installed}/vmlinuz
+    maze-sb-sign ${MAZE_SB_ESP} --force-bootloader
+
+Verify before rebooting — these two must report the same version:
+
+    objcopy -O binary --only-section=.uname /boot/EFI/BOOT/grubx64.efi /dev/stdout
+    ls /usr/lib/modules/
+BOOTSTATUS
     fi
 
     if [[ "${_sb_ok}" -eq 1 ]]; then

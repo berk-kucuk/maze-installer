@@ -31,7 +31,7 @@ maze-installer/
 ```
 
 ```sh
-./build.sh                                  # -> maze-installer-1.0.0-1-any.pkg.tar.zst
+./build.sh                                  # -> maze-installer-2.0.0-6-any.pkg.tar.zst
 ./build.sh --repo ../MazeLinux/localrepo    # build + add to the ISO's local repo
 ```
 

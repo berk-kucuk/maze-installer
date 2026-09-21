@@ -27,6 +27,17 @@ set -e
 
 R="$1"
 [ -n "$R" ] || { echo "calamares-prepare-target: no target root given" >&2; exit 1; }
+# This script mounts pseudo-filesystems under $R and deletes $R/home/maze. With
+# R="/" that becomes the LIVE system: its /home/maze (the running live user's
+# home) would be erased and the pseudo-mounts stacked onto the host. The check
+# above only rejects an empty argument, so bar "/" too — stripping the trailing
+# slash first collapses a bare "/" (and "//") to "", which the test then catches.
+R="${R%/}"
+[ -n "$R" ] && [ "$R" != "/" ] || {
+    echo "calamares-prepare-target: refusing to operate on '/' (the live system)" >&2
+    exit 1
+}
+[ -d "$R" ] || { echo "calamares-prepare-target: target '$R' is not a directory" >&2; exit 1; }
 
 # --- 1) API/pseudo filesystems --------------------------------------------
 # Mount FRESH pseudo-filesystems (exactly like arch-chroot), NOT `mount --rbind`
@@ -50,34 +61,84 @@ fi
 
 # --- 2) Replace the archiso mkinitcpio setup with a stock one -------------
 rm -f "$R/etc/mkinitcpio.conf.d/archiso.conf"
+# EVERY preset, not just the archiso one. The guard here used to be
+# `grep -q archiso "$preset" || continue`, written when `linux` was the only
+# kernel on the medium — and mkarchiso only marks THAT preset with 'archiso'.
+# The day maze-meta started pulling linux-lts, its stock preset sailed straight
+# past the filter, `mkinitcpio -P` on the target tried to build it, and because
+# /boot is the freshly formatted ESP there is no /boot/vmlinuz-linux-lts to
+# build from. mkinitcpio does not skip a preset it cannot satisfy: it aborts the
+# whole run and exits 1, which failed the Calamares job and therefore the entire
+# installation — the exact error this file's own comment predicted.
+#
+# The reasoning below applies to every kernel on a layout=uki system, so apply it
+# to every preset.
 for preset in "$R"/etc/mkinitcpio.d/*.preset; do
     [ -f "$preset" ] || continue
-    grep -q archiso "$preset" 2>/dev/null || continue
     k=$(basename "$preset" .preset)        # e.g. 'linux'
     echo "calamares-prepare-target: restoring stock mkinitcpio preset for $k"
     cat > "$preset" <<PRESET
-# mkinitcpio preset for '$k' (restored by the Maze installer; was the archiso preset)
+# mkinitcpio preset for '$k' — Maze Linux (replaces the archiso preset).
+#
+# Maze boots ONLY Unified Kernel Images: /etc/kernel/install.conf ships
+# layout=uki, so the artifact the firmware actually loads is
+# \$ESP/EFI/Linux/<machine-id>-<kver>.efi, built by 'kernel-install add'.
+# kernel-install's own mkinitcpio plugin (50-mkinitcpio.install) invokes
+# mkinitcpio directly with -k/-g and never reads this preset, so the loose
+# /boot/initramfs-*.img a normal preset produces are NEVER booted here. And
+# because /boot IS the FAT32 ESP on a Maze install, generating them burns
+# ~250-400 MB of it on every kernel update for nothing.
+#
+# The preset this replaces also carried ALL_kver="/boot/vmlinuz-$k". On a UKI
+# system that path is not guaranteed to exist, and when it is missing
+# 'mkinitcpio -P' does not skip the preset — it aborts the whole run with
+#     ==> ERROR: Invalid option -k -- '/boot/vmlinuz-$k' is an invalid path
+# and exits 1, taking every caller down with it (deploy-to-target.sh and
+# maze-gpu-driver both call it and both only 'warn' on failure).
+#
+# An EMPTY PRESETS makes 'mkinitcpio -P' a clean no-op — it exits 0 with an
+# informational warning — while kernel-install keeps building the real UKI.
+# If Maze ever moves off layout=uki, uncomment the lines below to restore a
+# conventional BLS-style preset.
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/boot/vmlinuz-$k"
+PRESETS=()
+#ALL_kver="/boot/vmlinuz-$k"
+#PRESETS=('default' 'fallback')
+#default_image="/boot/initramfs-$k.img"
+#fallback_image="/boot/initramfs-$k-fallback.img"
+#fallback_options="-S autodetect"
 
-PRESETS=('default' 'fallback')
-
-default_image="/boot/initramfs-$k.img"
-
-fallback_image="/boot/initramfs-$k-fallback.img"
-fallback_options="-S autodetect"
+# mkinitcpio SOURCES this file, so everything below runs on every 'mkinitcpio -P'.
+#
+# With PRESETS=() that command exits 0 having done nothing, and prints only
+# "Preset file is empty or does not contain any presets" — which, after a
+# boot-critical edit to mkinitcpio.conf or /etc/kernel/cmdline, reads exactly
+# like success. The user reboots and nothing has changed, or worse, trusts a
+# risky change they believe is live. Being inert is correct here; being SILENT
+# about it is not. Say what actually happened and name the command that works.
+#
+# mkinitcpio's process_preset is a SUBSHELL function (it is declared with
+# parentheses, not braces), so no variable can carry state from one preset to
+# the next and a print-once guard is impossible. This therefore prints once per
+# installed kernel — which is the right place anyway: directly beside each
+# "Preset file is empty" warning it explains. Kept to three lines for that reason.
+echo "==> NOTE (Maze Linux): this does NOT rebuild your boot images. Maze boots" >&2
+echo "==>   Unified Kernel Images (layout=uki), so presets are empty by design." >&2
+echo "==>   Rebuild + re-sign with:  sudo maze-initramfs-rebuild" >&2
 PRESET
 done
 
-# --- 3) Make sure the kernel image is present in the target /boot ---------
-for moddir in "$R"/usr/lib/modules/*/; do
-    [ -f "$moddir/vmlinuz" ] || continue
-    pkgbase=$(cat "$moddir/pkgbase" 2>/dev/null || echo linux)
-    if [ ! -e "$R/boot/vmlinuz-$pkgbase" ]; then
-        echo "calamares-prepare-target: installing /boot/vmlinuz-$pkgbase from modules"
-        cp "$moddir/vmlinuz" "$R/boot/vmlinuz-$pkgbase"
-    fi
-done
+# --- 3) (removed) /boot/vmlinuz-<pkgbase> copy ----------------------------
+# This used to copy the kernel out of /usr/lib/modules into the target /boot so
+# the restored preset's ALL_kver="/boot/vmlinuz-<pkgbase>" could resolve. That
+# preset is gone (PRESETS=() above), and nothing else reads the file:
+#   * Calamares' bootloader module walks /usr/lib/modules and calls
+#     `kernel-install add <kver> /usr/lib/modules/<kver>/vmlinuz` directly;
+#   * kernel-install's mkinitcpio plugin is passed the kernel image explicitly;
+#   * maze-sb-sign only globs it opportunistically.
+# Keeping it would put a 17 MB image on the FAT32 ESP that nothing boots and
+# nothing refreshes — so after the first kernel upgrade it would sit there
+# stale, and maze-sb-sign would keep signing a kernel that is no longer current.
 
 # --- 4) Purge the live 'maze' user's leftover home ------------------------
 # unpackfs copied the live user 'maze' and its /home/maze. The `removeuser`
