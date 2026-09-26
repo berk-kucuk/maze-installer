@@ -10,9 +10,11 @@ overlay into a pacman package. This is the "Install Maze Linux" flow.
 | `usr/local/bin/maze-calamares` | Launcher (XWayland + pkexec; refuses legacy BIOS boot) |
 | `etc/calamares/` | `settings.conf` + all module configs |
 | `usr/share/calamares/branding/maze/` | True-black OLED Calamares branding |
-| `usr/share/maze/install/deploy-to-target.sh` | **All** Maze install logic (branding, Plymouth, kernel params, Secure Boot / MOK signing, AUR apps, services) — wired in as a Calamares `shellprocess` |
-| `usr/local/share/maze/uefi-warning.qss` | Styling for the UEFI-required warning dialog |
+| `usr/share/maze/install/deploy-to-target.sh` | Driver wired in as a Calamares `shellprocess`: runs `steps/NN-*.sh` in order, times each, collects every warning, writes `/var/log/maze-install-summary.txt` on the target, and **fails the install** on a critical problem (will not boot, disk unlocks without passphrase, passwordless root, leftover NOPASSWD sudo) |
+| `usr/share/maze/install/steps/` | The install logic, one file per stage (live-residue removal, user homes, root lock, initramfs, cmdline/UKI/rollback, Secure Boot, services, pacman, apps, AUR, final boot-chain verification, keyring). Re-run chosen stages on a mounted target with `MAZE_DEPLOY_STEPS="70-cmdline-uki 96-verify-boot" deploy-to-target.sh /mnt` |
+| `tests/test_deploy.py` | The steps run against a fake target with stubbed `arch-chroot`/`findmnt`/`cryptsetup`/`objcopy`/… — `python -m unittest discover -s tests`. Run by `publish.sh` before every build |
 | `usr/local/share/maze/calamares-mount-api.sh` | mount-API helper used by the `shellprocess_mountapi` module |
+| `usr/local/share/maze/calamares-strip-keyfile.sh` | keeps the LUKS keyfile out of the initramfs/UKI (`shellprocess_stripkeyfile`) |
 | `usr/share/applications/maze-calamares.desktop` | Panel/dock launcher entry |
 | `usr/share/pixmaps/maze-installer.png` | Installer icon |
 
@@ -31,7 +33,7 @@ maze-installer/
 ```
 
 ```sh
-./build.sh                                  # -> maze-installer-2.0.0-6-any.pkg.tar.zst
+./build.sh                                  # -> maze-installer-<pkgver>-<pkgrel>-any.pkg.tar.zst
 ./build.sh --repo ../MazeLinux/localrepo    # build + add to the ISO's local repo
 ```
 

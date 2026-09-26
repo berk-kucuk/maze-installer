@@ -36,14 +36,21 @@ firmware setup, then boot the Maze medium again."
 fi
 
 if [[ "${EUID}" -ne 0 ]]; then
-    # Let root connect to the user's X/XWayland server.
+    # Let root connect to the user's X/XWayland server — only for as long as
+    # Calamares runs. Not exec'd, so the grant can be revoked afterwards (also
+    # when the launcher itself is interrupted); otherwise every root process
+    # would keep access to the live user's display for the rest of the session.
     xhost +SI:localuser:root >/dev/null 2>&1 || true
-    exec pkexec env \
+    trap 'xhost -SI:localuser:root >/dev/null 2>&1 || true' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    pkexec env \
         DISPLAY="${DISPLAY:-:0}" \
         XAUTHORITY="${XAUTHORITY:-}" \
         XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
         QT_QPA_PLATFORM=xcb \
         calamares -d
+    exit $?
 fi
 
 exec env QT_QPA_PLATFORM=xcb calamares -d

@@ -1,59 +1,52 @@
-/* Maze Linux — minimal OLED Calamares slideshow.
- * True-black background with a soft white glow and the install message.
- * Replace with a richer multi-slide deck later. */
-import QtQuick 2.0
+/* Maze Linux — Calamares installation slideshow (slideshowAPI 2).
+ *
+ * Seven 1600x960 slides, drawn by maze-installer/design/calamares-slides/gen.py
+ * (edit the text there and re-render; never edit the PNGs by hand). They are
+ * scaled down to the slideshow area (about 800x480 in the 980x640 window) and
+ * letterboxed on the slides' own background colour, so no bars show at other
+ * window sizes. mipmap keeps the 2x artwork sharp when it is scaled down.
+ */
+import QtQuick 2.15
 import calamares.slideshow 1.0
 
 Presentation {
     id: presentation
 
+    // slideshowAPI 2: Calamares calls these when the install page is shown
+    // and left. The first slide stays up until then.
     function onActivate() { timer.running = true; }
     function onLeave()    { timer.running = false; }
 
     Timer {
         id: timer
-        interval: 30000
+        interval: 12000
         running: false
         repeat: true
         onTriggered: presentation.goToNextSlide()
     }
 
-    Slide {
+    component MazeSlide: Slide {
+        property alias source: image.source
         anchors.fill: parent
 
         Rectangle {
             anchors.fill: parent
-            color: "#0e0e0e"
-
-            // soft bloom (blur-like) bottom-right
-            Rectangle {
-                width: 520; height: 520; radius: 260
-                anchors.right: parent.right; anchors.bottom: parent.bottom
-                anchors.rightMargin: -120; anchors.bottomMargin: -120
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: "#1a1a1a" }
-                    GradientStop { position: 1.0; color: "#0e0e0e" }
-                }
-                opacity: 0.6
-            }
-
-            Column {
-                anchors.centerIn: parent
-                spacing: 16
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: "Maze Linux"
-                    color: "#ffffff"
-                    font.pixelSize: 40
-                    font.bold: true
-                }
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: "Privacy-first, AI-native desktop — installing…"
-                    color: "#9a9aa6"
-                    font.pixelSize: 16
-                }
-            }
+            color: "#0a0a0b"
+        }
+        Image {
+            id: image
+            anchors.fill: parent
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+            mipmap: true
         }
     }
+
+    MazeSlide { source: "slide-01.png" }   // welcome
+    MazeSlide { source: "slide-02.png" }   // Secure Boot, LUKS, AppArmor
+    MazeSlide { source: "slide-03.png" }   // Maze Guard, Maze Cloak, kill switches
+    MazeSlide { source: "slide-04.png" }   // Haze, HazeDrop, Entropy Shield
+    MazeSlide { source: "slide-05.png" }   // Maze AI, local models
+    MazeSlide { source: "slide-06.png" }   // snapshots and rollback
+    MazeSlide { source: "slide-07.png" }   // updates and tools
 }

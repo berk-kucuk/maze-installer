@@ -12,7 +12,7 @@
 
 pkgname=maze-installer
 pkgver=2.0.0
-pkgrel=25
+pkgrel=36
 pkgdesc="Maze Linux Calamares installer — launcher, config, branding and deploy-to-target logic"
 arch=('any')
 url="https://mazelinux.berkkucukk.com.tr"
@@ -37,4 +37,5 @@ package() {
   chmod 755 "${pkgdir}/usr/local/bin/maze-calamares"
   chmod 755 "${pkgdir}/usr/share/maze/install/deploy-to-target.sh"
   chmod 755 "${pkgdir}/usr/local/share/maze/calamares-mount-api.sh"
+  chmod 755 "${pkgdir}/usr/local/share/maze/calamares-strip-keyfile.sh"
 }
