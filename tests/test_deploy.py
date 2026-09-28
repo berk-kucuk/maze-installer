@@ -444,6 +444,82 @@ class TestCmdlineAndInitramfs(DeployHarness):
         self.assertIn("MODULES=(i915)", mk)
         self.assertNotRegex(mk, r"HOOKS=\([^)]*\bkms\b")
 
+    def test_consolefont_is_dropped_without_a_console_font(self):
+        # Calamares always adds it; with no FONT= it only prints a warning on
+        # every UKI build.
+        self.prepare(hooks="base udev autodetect microcode modconf block keyboard keymap consolefont encrypt filesystems")
+        self.write("etc/vconsole.conf", "KEYMAP=trq\n")
+        self.run_steps("65-initramfs", env={"MAZE_BOOT_GPU_DRV": "i915"})
+        mk = self.read("etc/mkinitcpio.conf")
+        self.assertNotRegex(mk, r"HOOKS=\([^)]*\bconsolefont\b")
+        self.assertRegex(mk, r"HOOKS=\([^)]*\bkeymap\b")
+
+    def test_consolefont_stays_when_a_font_is_configured(self):
+        self.prepare(hooks="base udev autodetect microcode modconf block keyboard keymap consolefont encrypt filesystems")
+        self.write("etc/vconsole.conf", "KEYMAP=trq\nFONT=ter-v16n\n")
+        self.run_steps("65-initramfs", env={"MAZE_BOOT_GPU_DRV": "i915"})
+        self.assertRegex(self.read("etc/mkinitcpio.conf"), r"HOOKS=\([^)]*\bconsolefont\b")
+
+    def _ship_mkinitcpio_hooks_helper(self):
+        src = ROOT.parent / "maze-secureboot" / "maze-secureboot" / "usr" / "lib" / "maze-secureboot" / "mkinitcpio-hooks"
+        if not src.exists():
+            self.skipTest("maze-secureboot source tree not next to maze-installer")
+        dst = self.target / "usr/lib/maze-secureboot/mkinitcpio-hooks"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dst)
+
+    def test_arch_preset_hooks_are_masked_when_every_preset_is_empty(self):
+        self.prepare(hooks="base udev autodetect microcode modconf block keyboard encrypt filesystems")
+        self._ship_mkinitcpio_hooks_helper()
+        for k in ("linux", "linux-lts"):
+            self.write(f"etc/mkinitcpio.d/{k}.preset", 'ALL_config="/etc/mkinitcpio.conf"\nPRESETS=()\n')
+        r = self.run_steps("65-initramfs", env={"MAZE_BOOT_GPU_DRV": "i915"})
+        self.assertEqual(r.returncode, 0, self.out)
+        for h in ("90-mkinitcpio-install.hook", "60-mkinitcpio-remove.hook"):
+            p = self.target / "etc/pacman.d/hooks" / h
+            self.assertTrue(p.is_symlink(), h)
+            self.assertEqual(os.readlink(p), "/dev/null")
+
+    def test_arch_preset_hooks_stay_when_a_preset_builds_images(self):
+        # The ISO build and a restored stock preset both rely on Arch's hook.
+        self.prepare(hooks="base udev autodetect microcode modconf block keyboard encrypt filesystems")
+        self._ship_mkinitcpio_hooks_helper()
+        self.write("etc/mkinitcpio.d/linux.preset", 'ALL_config="/etc/mkinitcpio.conf"\nPRESETS=()\n')
+        self.write("etc/mkinitcpio.d/linux-lts.preset", "PRESETS=('default')\ndefault_image=/boot/x.img\n")
+        self.run_steps("65-initramfs", env={"MAZE_BOOT_GPU_DRV": "i915"})
+        self.assertFalse((self.target / "etc/pacman.d/hooks/90-mkinitcpio-install.hook").is_symlink())
+        self.assertIn("still active", self.out)
+
+    def _pci(self, name, vendor, cls):
+        d = self.tmp / "pci" / name
+        d.mkdir(parents=True)
+        (d / "vendor").write_text(vendor + "\n")
+        (d / "class").write_text(cls + "\n")
+        return str(self.tmp / "pci")
+
+    def test_broadcom_wl_is_removed_without_broadcom_wireless(self):
+        self.prepare()
+        self.cfg["installed"] = ["broadcom-wl-dkms", "dkms", "linux-headers", "linux-lts-headers"]
+        pci = self._pci("0000:02:00.0", "0x8086", "0x028000")   # Intel Wi-Fi
+        self._pci("0000:03:00.0", "0x14e4", "0x020000")         # Broadcom ETHERNET: not wl's
+        r = self.run_steps("60-gpu-keyboard", env={"MAZE_PCI_DEVICES": pci})
+        self.assertEqual(r.returncode, 0, self.out)
+        calls = self.chroot_calls()
+        self.assertIn("pacman -Rns --noconfirm broadcom-wl-dkms", calls)
+        for p in ("dkms", "linux-headers", "linux-lts-headers"):
+            self.assertIn(f"pacman -Rns --noconfirm {p}", calls)
+
+    def test_broadcom_wl_stays_with_broadcom_wireless(self):
+        self.prepare()
+        # linux-lts-headers missing: the one present must still be marked.
+        self.cfg["installed"] = ["broadcom-wl-dkms", "linux-headers"]
+        pci = self._pci("0000:02:00.0", "0x14e4", "0x028000")   # BCM43xx
+        self.run_steps("60-gpu-keyboard", env={"MAZE_PCI_DEVICES": pci})
+        calls = self.chroot_calls()
+        self.assertFalse(any(c.startswith("pacman -Rns") for c in calls), calls)
+        self.assertIn("pacman -D --asexplicit linux-headers", calls)
+        self.assertNotIn("pacman -D --asexplicit linux-lts-headers", calls)
+
     def test_a_missing_encrypt_hook_is_forced_in(self):
         self.prepare(hooks="base udev autodetect microcode modconf keyboard block filesystems")
         r = self.run_steps("60-gpu-keyboard", "65-initramfs", "70-cmdline-uki", env={"MAZE_BOOT_GPU_DRV": "i915"})

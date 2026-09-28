@@ -89,3 +89,44 @@ case "${_dmi_family}" in
         ;;
 esac
 
+
+# 3d) Broadcom wl only where there is Broadcom wireless -----------------------
+# broadcom-wl-dkms is on the ISO so the live session has Wi-Fi on the BCM43xx
+# chips only `wl` drives, and unpackfs carries it onto every install. There it is
+# pure cost: DKMS compiles it for every installed kernel on every kernel update
+# (two builds per update with linux-lts), which is also what keeps dkms and both
+# header packages (~130 MB per update) on the machine. Keep it only when this
+# machine — the live medium runs on the target hardware — has a Broadcom
+# network controller of class 0x0280 (wireless).
+_pci="${MAZE_PCI_DEVICES:-/sys/bus/pci/devices}"
+_bcm_wifi=0
+for _pd in "${_pci}"/*; do
+    [[ "$(cat "${_pd}/vendor" 2>/dev/null)" == "0x14e4" ]] || continue
+    [[ "$(cat "${_pd}/class" 2>/dev/null)" == 0x0280* ]] && { _bcm_wifi=1; break; }
+done
+if in_chroot pacman -Qq broadcom-wl-dkms >/dev/null 2>&1; then
+    if [[ "${_bcm_wifi}" -eq 1 ]]; then
+        log "Broadcom wireless present — keeping broadcom-wl-dkms and the headers it builds against"
+        # Explicit, so removing orphans can never take away what wl builds
+        # against. One at a time: -D fails as a whole on a missing name.
+        for _p in linux-headers linux-lts-headers; do
+            in_chroot pacman -Qq "${_p}" >/dev/null 2>&1 || continue
+            in_chroot pacman -D --asexplicit "${_p}" >/dev/null 2>&1 || true
+        done
+    elif in_chroot pacman -Rns --noconfirm broadcom-wl-dkms >/dev/null 2>&1; then
+        log "No Broadcom wireless — removed broadcom-wl-dkms (no DKMS build on every kernel update)"
+        # Nothing left for DKMS to build: its toolchain goes too. One package
+        # per call, so one that something still requires (an older maze-meta
+        # depends on linux-lts-headers) cannot block the others.
+        if [[ -z "$(in_chroot dkms status 2>/dev/null)" ]]; then
+            for _p in dkms linux-headers linux-lts-headers; do
+                in_chroot pacman -Qq "${_p}" >/dev/null 2>&1 || continue
+                in_chroot pacman -Rns --noconfirm "${_p}" >/dev/null 2>&1 \
+                    && log "  removed ${_p} (no DKMS module left)" \
+                    || log "  kept ${_p} (still required by another package)"
+            done
+        fi
+    else
+        warn "could not remove broadcom-wl-dkms (it will keep building on kernel updates)"
+    fi
+fi

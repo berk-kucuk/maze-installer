@@ -20,6 +20,41 @@ overlay into a pacman package. This is the "Install Maze Linux" flow.
 
 Live-medium package: install it on the ISO. Not needed on an installed system.
 
+## Installation
+
+> **Live ISO only.** maze-installer is the installer of the Maze Linux live
+> ISO. It is deliberately *not* part of `maze-meta` and must not be installed
+> on an installed system: it carries the live session's Calamares setup.
+
+### From the Maze repository
+
+The Maze Linux ISO profile lists `maze-installer` in `packages.x86_64`, and
+mkarchiso pulls it from `[mazelinux]` like any other package. An ISO profile of
+your own gets it the same way once its `pacman.conf` has the repository:
+
+```ini
+[mazelinux]
+SigLevel = Required DatabaseOptional
+Server = https://mazerepo.berkkucukk.com.tr/packages
+```
+
+The build host must trust the Maze signing key (`7C4D515A6B930CB04794CEF6147C8159B3E2EE5F`):
+
+```bash
+curl -O https://mazerepo.berkkucukk.com.tr/packages/mazelinux.gpg
+sudo pacman-key --add mazelinux.gpg
+sudo pacman-key --lsign-key 7C4D515A6B930CB04794CEF6147C8159B3E2EE5F
+```
+
+### Build from source
+
+```bash
+sudo pacman -S --needed base-devel git
+git clone https://github.com/berk-kucuk/maze-installer.git
+cd maze-installer
+./build.sh --repo ../MazeLinux/localrepo   # build + add to the ISO's local repo
+```
+
 ## Layout & building
 
 ```

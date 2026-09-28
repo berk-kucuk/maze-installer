@@ -184,3 +184,34 @@ if [[ -f "${mkconf}" ]]; then
     # Drop any xz-style COMPRESSION_OPTIONS that would no longer apply to zstd.
     sed -i -E 's|^[[:space:]]*COMPRESSION_OPTIONS=.*|COMPRESSION_OPTIONS=()|' "${mkconf}" 2>/dev/null || true
 fi
+
+# `consolefont` without a FONT= in /etc/vconsole.conf does nothing but print
+# "consolefont: no font found in configuration" on every UKI build — every
+# kernel update, every driver install. Calamares' initcpiocfg adds it
+# unconditionally; Maze sets no console font, so it is dropped unless the
+# target actually configures one (then it stays, and does its job).
+if [[ -f "${mkconf}" ]] && ! grep -qE '^[[:space:]]*FONT=[^[:space:]]' "${TARGET}/etc/vconsole.conf" 2>/dev/null; then
+    sed -i -E '/^[[:space:]]*HOOKS=/ s/[[:space:]]*\bconsolefont\b//' "${mkconf}" 2>/dev/null \
+        && log "mkinitcpio: dropped 'consolefont' (no console font configured)" \
+        || warn "mkinitcpio HOOKS (consolefont) removal failed"
+fi
+
+# One UKI build path on the installed system. calamares-mount-api.sh emptied the
+# presets; with that, Arch's 90-mkinitcpio-install / 60-mkinitcpio-remove hooks
+# only print warnings on every update, and come back to life (copying images
+# onto the ESP) the moment a preset is regenerated from Arch's template. The
+# helper masks them only when every preset is the Maze empty one, and is the
+# same code the maze-secureboot scriptlet runs on existing installs. Run from
+# the host with MAZE_ROOT: it only reads and links files under the target, and
+# it must be in place before the first pacman transaction on the target.
+_mkh="${TARGET}/usr/lib/maze-secureboot/mkinitcpio-hooks"
+if [[ -f "${_mkh}" ]]; then
+    MAZE_ROOT="${TARGET}" sh "${_mkh}" apply 2>&1 | sed 's/^/    /' || true
+    if [[ "$(MAZE_ROOT="${TARGET}" sh "${_mkh}" status 2>/dev/null)" == masked ]]; then
+        log "mkinitcpio: Arch's preset hooks disabled — the UKI is built only by kernel-install"
+    else
+        warn "mkinitcpio: Arch's preset hooks are still active (a preset is not the Maze empty one)"
+    fi
+else
+    log "mkinitcpio: maze-secureboot on the target predates the hook masking; its next upgrade applies it"
+fi
