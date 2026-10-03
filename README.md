@@ -79,3 +79,9 @@ maze-installer/
   copies them onto the target. Those source files are supplied by the other Maze
   packages (`maze-branding`, `maze-plasma-config`, `maze-tools`) and by build
   hooks — this package owns only the installer itself.
+
+## License
+
+Copyright © 2026 Berk Küçük
+
+Released under the GNU General Public License v3.0 — see [LICENSE](LICENSE).
