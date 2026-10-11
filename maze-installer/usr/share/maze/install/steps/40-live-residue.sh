@@ -13,6 +13,18 @@ rm -f "${TARGET}/etc/polkit-1/rules.d/49-maze-calamares.rules" 2>/dev/null || tr
 rm -f "${TARGET}/etc/systemd/system/getty@tty1.service.d/autologin.conf" 2>/dev/null || true
 rmdir "${TARGET}/etc/systemd/system/getty@tty1.service.d" 2>/dev/null || true
 rm -f "${TARGET}/etc/sddm.conf.d/10-maze-autologin.conf" 2>/dev/null || true
+# The four live-only privilege grants above are removed with `|| true`, so a
+# failed rm used to pass silently and leave passwordless sudo / pkexec / root
+# autologin on the installed system. Verify they are really gone.
+for _live_grant in \
+    "${TARGET}/etc/sudoers.d/10-maze" \
+    "${TARGET}/etc/polkit-1/rules.d/49-maze-calamares.rules" \
+    "${TARGET}/etc/systemd/system/getty@tty1.service.d/autologin.conf" \
+    "${TARGET}/etc/sddm.conf.d/10-maze-autologin.conf"; do
+    if [[ -e "${_live_grant}" || -L "${_live_grant}" ]]; then
+        critical "live-session privilege grant still present on the target: ${_live_grant#"${TARGET}"} — remove it before first boot"
+    fi
+done
 # 3b. The Firefox enterprise policy is LIVE-ONLY. It pins the homepage and the
 #     first-run page to the Maze site, which is what the live session should
 #     show — but an installed system's Firefox must come up with its own stock

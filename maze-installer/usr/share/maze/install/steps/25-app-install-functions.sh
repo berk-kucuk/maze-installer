@@ -100,175 +100,168 @@ install_aur_packages() {
         return 0
     fi
 
-    # Temporary passwordless sudo for the build user (makepkg calls sudo pacman).
-    local sudoers="${TARGET}/etc/sudoers.d/99-maze-build"
-    # env_keep: the build script's `sudo pacman -U` must inherit SNAP_PAC_SKIP
-    # from in_chroot (sudo's env_reset would drop it and snap-pac would fire).
-    printf 'Defaults env_keep += "SNAP_PAC_SKIP"\n%s ALL=(ALL) NOPASSWD: ALL\n' "${build_user}" > "${sudoers}"
-    chmod 440 "${sudoers}"
-    trap 'rm -f "'"${sudoers}"'"' EXIT
-
-    # Write the build steps to a file in the build user's home and run it as the
-    # user. A standalone script (instead of a heredoc piped through
-    # arch-chroot+sudo) is far more reliable. stdin is /dev/null so any
-    # unexpected prompt fails fast instead of hanging; each package gets a hard
-    # timeout for the same reason.
-    local buildscript="${TARGET}${build_home}/.maze-aur-build.sh"
-    local buildscript_in_chroot="${build_home}/.maze-aur-build.sh"
-    cat > "${buildscript}" <<'MAKEPKG'
+    # No sudo for the build user — not even temporarily. This used to write
+    # /etc/sudoers.d/99-maze-build with "<user> ALL=(ALL) NOPASSWD: ALL" so that
+    # `makepkg -s` and the final `pacman -U` could run, and then execute a
+    # PKGBUILD freshly cloned from AUR HEAD as that user. Whoever controlled that
+    # PKGBUILD (a maintainer, an adopter of an orphaned package, a stolen
+    # account) got a passwordless-root shell on every new install, for the whole
+    # build. The privileged steps are now done by THIS script, as root, around
+    # an unprivileged build:
+    #   1. clone (as the user) — at a reviewed commit if aur-pins lists one,
+    #   2. read the dependencies from .SRCINFO (as the user) and install the
+    #      missing ones from the official repos (as root, pacman only),
+    #   3. makepkg WITHOUT -s (as the user, no sudo available),
+    #   4. pacman -U the result (as root).
+    # The PKGBUILD's own code still runs during step 3 and the package's
+    # install scriptlet runs in step 4 — inherent to installing from the AUR —
+    # but the build no longer holds root, and a pin turns "whatever HEAD is
+    # today" into "the commit someone reviewed".
+    local helper="${TARGET}${build_home}/.maze-aur-build.sh"
+    local helper_in_chroot="${build_home}/.maze-aur-build.sh"
+    cat > "${helper}" <<'MAKEPKG'
 #!/usr/bin/env bash
+# Unprivileged half of the AUR install. Called by the installer (root) as the
+# build user, one subcommand at a time; it never has, or asks for, sudo.
 set -u
 exec </dev/null
-PKGS=("$@")
-total=${#PKGS[@]}
-rc=0
-failed=()
-
-# Verbose build output (git/makepkg/pacman) goes ONLY to this file; the terminal
-# gets just short, human-readable status lines ("Installing onlyoffice-bin from the
-# AUR..."). The file lives in the build user's home (always writable) and is
-# folded into /var/log/maze-aur-install.log by the caller afterwards.
 VLOG="${HOME:-/tmp}/.maze-aur-verbose.log"
-: > "${VLOG}" 2>/dev/null || VLOG=/dev/null
+[[ -w "${VLOG}" || ! -e "${VLOG}" ]] || VLOG=/dev/null
 
-# Retry a network-bound command a few times with a short backoff (its output goes
-# to the verbose log), so a single unresponsive mirror/AUR no longer drops a
-# package — which is how a transient clone/build failure used to drop an app.
 retry() {
     local tries="$1"; shift
     local n=1
     while true; do
         "$@" >>"${VLOG}" 2>&1 && return 0
-        if (( n >= tries )); then
-            return 1
-        fi
+        (( n >= tries )) && return 1
         echo "   ...attempt ${n}/${tries} failed, retrying in $((n*5))s"
-        sleep $((n*5))
-        ((n++))
+        sleep $((n*5)); ((n++))
     done
 }
 
-# Clone, build and install one AUR package by name. Returns 0 on success. Always
-# clones fresh from the AUR so packages are the current upstream version with the
-# latest PKGBUILD — never a stale snapshot frozen into the ISO. The chroot has
-# working DNS (resolv.conf copied up front). Every network-bound step is retried
-# so a momentarily unresponsive AUR/repo does not drop the package. All the noisy
-# command output is sent to ${VLOG}; only short status lines reach the terminal.
-build_one() {
-    local pkg="$1" tmp ok=1
-    # Already installed? Then there is nothing to build. The curated apps that
-    # ship on the live ISO (upscayl-bin, session-desktop-bin,
-    # joplin-bin, claude-code, ...) were prebuilt from the AUR into Maze's local
-    # repo at ISO-build time, so unpackfs has already copied them onto the target
-    # — fully built and pacman-registered. Re-cloning and re-building them here
-    # over the network was pure redundant work and the single biggest reason a
-    # fresh install took 30+ minutes. Skip them; only the apps deliberately kept
-    # off the ISO (e.g. onlyoffice-bin for size) — or missing from an ISO built
-    # without them, such as paru — actually reach the makepkg path below. Installed apps stay at the
-    # ISO snapshot version; the user updates them later with pacman/paru.
-    if pacman -Qq "$pkg" >/dev/null 2>&1; then
-        echo "   -> ${pkg} already installed (copied from the ISO); skipping AUR build."
-        return 0
+cmd="${1:-}"; shift || true
+case "${cmd}" in
+    clone)      # clone PKG DIR [COMMIT]
+        pkg="$1" dir="$2" pin="${3:-}"
+        if [[ -n "${pin}" ]]; then
+            retry 3 git clone "https://aur.archlinux.org/${pkg}.git" "${dir}" || exit 1
+            git -C "${dir}" -c advice.detachedHead=false checkout --quiet --detach "${pin}" >>"${VLOG}" 2>&1 || exit 1
+            [[ "$(git -C "${dir}" rev-parse HEAD)" == "${pin}"* ]] || { echo "   -> pinned commit mismatch for ${pkg}"; exit 1; }
+        else
+            retry 3 git clone --depth 1 "https://aur.archlinux.org/${pkg}.git" "${dir}" || exit 1
+        fi
+        ;;
+    srcinfo)    # srcinfo DIR -> dependency specs on stdout, one per line
+        cd "$1" || exit 1
+        makepkg --printsrcinfo 2>>"${VLOG}" \
+            | sed -nE 's/^[[:space:]]*(make|check)?depends(_x86_64)? = (.+)$/\3/p' | sort -u
+        ;;
+    build)      # build DIR (no -s: dependencies were installed by root already)
+        retry 2 timeout 1800 bash -c 'cd "$1" && makepkg --noconfirm' _ "$1" || exit 1
+        ;;
+    *) echo "usage: $0 clone|srcinfo|build ..." >&2; exit 2 ;;
+esac
+MAKEPKG
+    chmod 755 "${helper}"
+    in_chroot chown "${build_user}:${build_user}" "${helper_in_chroot}" 2>/dev/null || true
+
+    # Optional review pins: "<pkg> <full commit hash>" per line, # comments.
+    local pins_file="${MAZE_STEP_DIR:-$(dirname "${BASH_SOURCE[0]}")}/../aur-pins"
+    declare -A _aur_pin=()
+    if [[ -r "${pins_file}" ]]; then
+        local _p _c
+        while read -r _p _c _; do
+            [[ -z "${_p}" || "${_p}" == \#* ]] && continue
+            [[ "${_c}" =~ ^[0-9a-f]{40}$ ]] && _aur_pin["${_p}"]="${_c}"
+        done < "${pins_file}"
     fi
-    tmp=$(mktemp -d)
-    if retry 3 git clone --depth 1 "https://aur.archlinux.org/${pkg}.git" "$tmp/$pkg"; then
-        # Build only (-s installs build/runtime deps from the repos), with a
-        # 30-minute ceiling so a stuck build can never block the install. The
-        # whole makepkg run is retried because most build failures here are
-        # transient source/dependency download errors, not real build breaks.
-        if retry 2 timeout 1800 bash -c 'cd "$1" && makepkg -s --noconfirm --needed' _ "$tmp/$pkg"; then
-            # Install the built package(s) ourselves. No --overwrite: a file
-            # conflict means the package would clobber a file another package
-            # owns (or an untracked system file), and that must fail loudly
-            # rather than be silently overwritten on a fresh install.
-            shopt -s nullglob
-            # makepkg's default OPTIONS=(debug) also emits <pkg>-debug split
-            # packages; installing them left paru-debug on every machine. Skip
-            # them — nobody debugs paru with gdb on a desktop install.
-            local pkgfiles=() _pf
-            for _pf in "$tmp/$pkg"/*.pkg.tar.*; do
-                case "$(basename "${_pf}")" in *-debug-*) continue ;; esac
-                pkgfiles+=("${_pf}")
-            done
-            shopt -u nullglob
-            if [[ ${#pkgfiles[@]} -gt 0 ]]; then
-                if retry 2 sudo pacman -U --noconfirm --needed "${pkgfiles[@]}"; then
-                    ok=0
+
+    local aur_log="${TARGET}/var/log/maze-aur-install.log"
+    : > "${aur_log}"
+    _aur_user() { in_chroot sudo -u "${build_user}" -H bash "${helper_in_chroot}" "$@"; }
+
+    # Root half of one package. Returns 0 on success.
+    _aur_build_one() {
+        local pkg="$1" tmp deps missing pkgfiles=() _pf
+        if in_chroot pacman -Qq "${pkg}" >/dev/null 2>&1; then
+            echo "   -> ${pkg} already installed (copied from the ISO); skipping AUR build."
+            return 0
+        fi
+        # In the user's home, not /tmp: arch-chroot mounts a fresh tmpfs on
+        # /tmp for every invocation, so a directory made there in one call is
+        # gone in the next.
+        tmp=$(in_chroot sudo -u "${build_user}" mktemp -d -p "${build_home}" .maze-aur.XXXXXX) || return 1
+        local dir="${tmp}/${pkg}"
+        [[ -n "${_aur_pin[${pkg}]:-}" ]] && echo "   (pinned to ${_aur_pin[${pkg}]:0:12})"
+        if ! _aur_user clone "${pkg}" "${dir}" "${_aur_pin[${pkg}]:-}"; then
+            in_chroot rm -rf "${tmp}"; return 1
+        fi
+        mapfile -t deps < <(_aur_user srcinfo "${dir}")
+        if (( ${#deps[@]} )); then
+            # pacman -T prints the specs that are NOT satisfied (versions and
+            # provides honoured); install exactly those, from the repos only.
+            mapfile -t missing < <(in_chroot pacman -T "${deps[@]}" 2>/dev/null | sed -E 's/[<>=].*$//')
+            if (( ${#missing[@]} )); then
+                if ! in_chroot pacman -S --needed --noconfirm --asdeps "${missing[@]}" >>"${aur_log}" 2>&1; then
+                    echo "   -> could not install build dependencies for ${pkg}: ${missing[*]}"
+                    in_chroot rm -rf "${tmp}"; return 1
                 fi
             fi
         fi
-    fi
-    rm -rf "$tmp"
-    return "$ok"
-}
+        if ! _aur_user build "${dir}"; then
+            in_chroot rm -rf "${tmp}"; return 1
+        fi
+        shopt -s nullglob
+        for _pf in "${TARGET}${dir}"/*.pkg.tar.*; do
+            # makepkg's default OPTIONS=(debug) also emits <pkg>-debug splits.
+            case "$(basename "${_pf}")" in *-debug-*) continue ;; esac
+            pkgfiles+=("${_pf#"${TARGET}"}")
+        done
+        shopt -u nullglob
+        local ok=1
+        # No --overwrite: a file conflict must fail loudly on a fresh install.
+        if (( ${#pkgfiles[@]} )) && in_chroot pacman -U --noconfirm --needed "${pkgfiles[@]}" >>"${aur_log}" 2>&1; then
+            ok=0
+        fi
+        in_chroot rm -rf "${tmp}"
+        return "${ok}"
+    }
 
-i=0
-for pkg in "${PKGS[@]}"; do
-    ((i++))
-    echo ":: (${i}/${total}) Installing ${pkg} from the AUR..."
-    if build_one "$pkg"; then
-        echo "   -> ${pkg} installed."
-    else
-        echo "   -> ERROR: ${pkg} failed (see /var/log/maze-aur-install.log)."
-        rc=1; failed+=("$pkg")
-    fi
-done
-
-# AUR helper fallback: if paru was requested but did not end up installed (e.g.
-# its source build failed), try yay instead — also built from source so it
-# matches this system's libalpm ABI — so the system still has a usable helper.
-if printf '%s\n' "${PKGS[@]}" | grep -qx paru && ! pacman -Qq paru >/dev/null 2>&1; then
-    echo ":: paru not installed — falling back to yay as the AUR helper..."
-    if build_one yay; then
-        echo "   -> yay installed (paru fallback)."
-        # A working helper is present, so paru's earlier failure is no longer a
-        # real problem — drop it from the failure list.
-        _kept=()
-        for _x in "${failed[@]}"; do [[ "$_x" == paru ]] || _kept+=("$_x"); done
-        failed=("${_kept[@]}")
-        (( ${#failed[@]} == 0 )) && rc=0
-    else
-        echo "   -> ERROR: yay fallback also failed — no AUR helper installed."
-        failed+=(yay)
-    fi
-fi
-
-echo ""
-if (( ${#failed[@]} == 0 )); then
-    echo ":: All AUR packages installed successfully."
-else
-    echo ":: Done with errors. Failed: ${failed[*]}"
-    echo ":: Re-run 'maze-aur-setup' after login to retry the failed ones."
-fi
-exit "$rc"
-MAKEPKG
-    chmod 755 "${buildscript}"
-    # Owned by the build user so they can read/execute it.
-    in_chroot chown "${build_user}:${build_user}" "${buildscript_in_chroot}" 2>/dev/null || true
-
-    # The build script prints only short status lines ("Installing onlyoffice-bin from
-    # the AUR...") to stdout; post_install runs this with peek_output=True, so the
-    # user sees those concise lines live instead of a frozen screen. The verbose
-    # git/makepkg/pacman output is written to the build user's ~/.maze-aur-verbose.log
-    # and folded into /var/log/maze-aur-install.log afterwards for debugging.
     log "Installing AUR packages now — progress follows (full details in /var/log/maze-aur-install.log):"
-    in_chroot sudo -u "${build_user}" -H bash "${buildscript_in_chroot}" "${aur_list[@]}" 2>&1 \
-        | tee "${TARGET}/var/log/maze-aur-install.log"
-    local _aur_rc="${PIPESTATUS[0]}"
-    # Append the detailed build transcript so the log has both the summary and the
-    # full output, even though only the summary was shown on screen.
+    local _aur_rc=0 failed=() i=0 total=${#aur_list[@]} pkg
+    for pkg in "${aur_list[@]}"; do
+        ((i++))
+        echo ":: (${i}/${total}) Installing ${pkg} from the AUR..." | tee -a "${aur_log}"
+        if _aur_build_one "${pkg}"; then
+            echo "   -> ${pkg} installed." | tee -a "${aur_log}"
+        else
+            echo "   -> ERROR: ${pkg} failed (see /var/log/maze-aur-install.log)." | tee -a "${aur_log}"
+            _aur_rc=1; failed+=("${pkg}")
+        fi
+    done
+    # AUR helper fallback: paru requested but missing -> try yay (also from source).
+    if printf '%s\n' "${aur_list[@]}" | grep -qx paru && ! in_chroot pacman -Qq paru >/dev/null 2>&1; then
+        echo ":: paru not installed — falling back to yay as the AUR helper..." | tee -a "${aur_log}"
+        if _aur_build_one yay; then
+            echo "   -> yay installed (paru fallback)." | tee -a "${aur_log}"
+            local _kept=() _x
+            for _x in "${failed[@]}"; do [[ "${_x}" == paru ]] || _kept+=("${_x}"); done
+            failed=("${_kept[@]}")
+            (( ${#failed[@]} == 0 )) && _aur_rc=0
+        else
+            echo "   -> ERROR: yay fallback also failed — no AUR helper installed." | tee -a "${aur_log}"
+            failed+=(yay)
+        fi
+    fi
+
     local _vlog="${TARGET}${build_home}/.maze-aur-verbose.log"
     if [[ -f "${_vlog}" ]]; then
-        { echo ""; echo "===== detailed build log ====="; cat "${_vlog}"; } \
-            >> "${TARGET}/var/log/maze-aur-install.log" 2>/dev/null || true
+        { echo ""; echo "===== detailed build log ====="; cat "${_vlog}"; } >> "${aur_log}" 2>/dev/null || true
         rm -f "${_vlog}"
     fi
     if [[ "${_aur_rc}" -ne 0 ]]; then
-        warn "AUR install had failures — see /var/log/maze-aur-install.log (or run 'maze-aur-setup' after login)"
+        warn "AUR install had failures (${failed[*]}) — see /var/log/maze-aur-install.log (or run 'maze-aur-setup' after login)"
     fi
-
-    rm -f "${buildscript}"
-    rm -f "${sudoers}"
-    trap - EXIT
+    rm -f "${helper}"
 }
 

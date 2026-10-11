@@ -11,7 +11,7 @@
 # current locations so the package is a drop-in for the airootfs files.
 
 pkgname=maze-installer
-pkgver=2.1.0
+pkgver=2.1.1
 pkgrel=1
 pkgdesc="Maze Linux Calamares installer — launcher, config, branding and deploy-to-target logic"
 arch=('any')

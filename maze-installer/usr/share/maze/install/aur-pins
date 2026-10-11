@@ -1,0 +1,13 @@
+# Reviewed AUR commits for the packages the installer builds from source.
+#
+# One "<package> <full 40-character commit hash>" per line. A listed package is
+# cloned and checked out at exactly that commit (verified with git rev-parse)
+# instead of whatever the AUR HEAD happens to be at install time. Review the
+# PKGBUILD and .install at that commit before pinning it:
+#     git clone https://aur.archlinux.org/<package>.git && cd <package>
+#     git log -1 --format=%H        # the hash to put here
+#
+# Unlisted packages are still built from HEAD (with no sudo for the build).
+#
+# paru         0000000000000000000000000000000000000000
+# onlyoffice-bin 0000000000000000000000000000000000000000

@@ -3,6 +3,25 @@ log "Applying Maze defaults to user home directories"
 for home in "${TARGET}"/home/*; do
     [[ -d "${home}" ]] || continue
     user=$(basename "${home}")
+    # Only real accounts, and never through a symlink. With manual
+    # partitioning a pre-existing /home can be reused, so entries here are not
+    # necessarily ones Calamares created: a directory name was spliced into the
+    # sed script below (a name containing "#e;#" would have made GNU sed run a
+    # command as root), and a symlinked home would have redirected the root
+    # cp/chown/chmod calls into the target system.
+    if [[ -L "${home}" ]]; then
+        warn "skipping ${home}: it is a symlink"
+        continue
+    fi
+    if [[ ! "${user}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        warn "skipping ${home}: not a valid user name"
+        continue
+    fi
+    _pw_home=$(in_chroot getent passwd "${user}" 2>/dev/null | cut -d: -f6)
+    if [[ "${_pw_home}" != "/home/${user}" ]]; then
+        warn "skipping ${home}: no account owns it"
+        continue
+    fi
     owner_uid=$(stat -c '%u' "${home}")
     owner_gid=$(stat -c '%g' "${home}")
     # Maze Guard gates its privileged-helper control socket (/run/maze/maze.sock)
@@ -32,6 +51,9 @@ for home in "${TARGET}"/home/*; do
     # and the user loses the Maze oh-my-zsh prompt + fastfetch banner. Overwrite
     # it explicitly. Same for .oh-my-zsh (must be the Maze one).
     if [[ -f "${TARGET}/etc/skel/.zshrc" ]]; then
+        # rm first: cp -f writes THROUGH an existing symlink, so a ~/.zshrc
+        # pointing elsewhere would have had root overwrite its target.
+        rm -f "${home}/.zshrc" 2>/dev/null || true
         cp -f "${TARGET}/etc/skel/.zshrc" "${home}/.zshrc" 2>/dev/null || true
     fi
     [[ -d "${TARGET}/etc/skel/.oh-my-zsh" ]] && cp -an "${TARGET}/etc/skel/.oh-my-zsh" "${home}/" 2>/dev/null || true
@@ -69,7 +91,9 @@ EOF
     # skel before skel was patched, and the cp -an above is no-clobber).
     set_default_browser "${home}/.config/mimeapps.list"
     set_kde_browser     "${home}/.config/kdeglobals"
-    chown -R "${owner_uid}:${owner_gid}" "${home}" 2>/dev/null || true
+    # -h: change symlinks themselves, never what they point at (chown -R
+    # otherwise dereferences links it meets, e.g. one aimed at ../../etc/shadow).
+    chown -R -h "${owner_uid}:${owner_gid}" "${home}" 2>/dev/null || true
     # Private home: 700 (not world-readable). A desktop home holds keys, tokens
     # and history; a 755 home leaks all of it to every local account. (lynis
     # HOME-9304.)
