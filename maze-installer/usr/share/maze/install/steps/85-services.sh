@@ -107,9 +107,8 @@ sec_selected() {
     # Calamares invokes this script with the security CSV as "all" for the
     # default install. Without the "all" case, sec_selected would treat "all" as
     # a feature name matching nothing, so EVERY real feature (apparmor, firewalld,
-    # fail2ban, opensnitch, macchanger, …) would read as unselected — silently
-    # not enabling them, wrongly stripping MAC randomization, and deleting the
-    # opensnitch tray autostart (the visible symptom).
+    # fail2ban, macchanger, …) would read as unselected — silently not enabling
+    # them.
     [[ -z "${SECURITY_CSV}" || "${SECURITY_CSV}" == "all" ]] && return 0
     case ",${SECURITY_CSV}," in
         *",${key},"*) return 0 ;;
@@ -129,16 +128,8 @@ sec_selected clamav     && in_chroot systemctl enable clamav-freshclam  >/dev/nu
 # choice inside its own UI, so the installer's "macchanger" security toggle no
 # longer does anything at deploy time.
 
-# OpenSnitch: daemon always enabled but starts in allow-all (passive) mode.
-# GUI autostarts so user sees it in the tray; they can activate interception manually.
-if sec_selected opensnitch; then
-    in_chroot systemctl enable opensnitchd >/dev/null 2>&1 || true
-else
-    rm -f "${TARGET}/etc/skel/.config/autostart/opensnitch_ui.desktop" 2>/dev/null || true
-    for home in "${TARGET}"/home/*; do
-        [[ -d "${home}" ]] && rm -f "${home}/.config/autostart/opensnitch_ui.desktop" 2>/dev/null || true
-    done
-fi
+# OpenSnitch is no longer part of Maze (removed 2026-10): the ISO does not ship
+# it, so there is no daemon to enable and no tray autostart to strip here.
 
 if sec_selected firewalld; then
     in_chroot firewall-offline-cmd --add-service=ssh          >/dev/null 2>&1 || true
