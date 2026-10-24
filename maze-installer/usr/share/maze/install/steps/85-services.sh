@@ -133,7 +133,6 @@ sec_selected clamav     && in_chroot systemctl enable clamav-freshclam  >/dev/nu
 
 if sec_selected firewalld; then
     in_chroot firewall-offline-cmd --add-service=ssh          >/dev/null 2>&1 || true
-    in_chroot firewall-offline-cmd --add-service=kdeconnect   >/dev/null 2>&1 || true
     # maze-connect (TCP+UDP 38271) — BACKSTOP only. Owning this rule is the
     # maze-connect package's job and its scriptlet does it properly now; this line
     # exists because the failure mode is silent (the app runs, shows its address,

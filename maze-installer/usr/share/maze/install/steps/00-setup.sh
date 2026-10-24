@@ -92,5 +92,5 @@ done
 # leaves the machine by default cannot install them without asking; they stay
 # one `pacman -S` away in [mazelinux]. Until 2.0.0-22 they WERE in this list,
 # so every install got them while maze-meta and the docs said otherwise.
-DEFAULT_MAZE_APPS=(entropy-shield qlam maze-guard hazedrop haze maze-ai maze-connect maze-cloak)
+DEFAULT_MAZE_APPS=(entropy-shield qlam maze-guard hazedrop haze maze-ai maze-connect maze-cloak maze-store)
 
