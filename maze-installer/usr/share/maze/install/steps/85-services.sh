@@ -35,7 +35,7 @@ fi
 log "Enabling base Maze services"
 for svc in ollama acpid power-profiles-daemon smartd fstrim.timer bluetooth cups \
            tor systemd-oomd fwupd-refresh.timer reflector.timer maze-flatpak-setup.service \
-           maze-guardd.service maze-sentinel-setup.service maze-sentinel.service; do
+           maze-switchd.service maze-sentinel-setup.service maze-sentinel.service; do
     in_chroot systemctl enable "${svc}" >/dev/null 2>&1 || true
 done
 
