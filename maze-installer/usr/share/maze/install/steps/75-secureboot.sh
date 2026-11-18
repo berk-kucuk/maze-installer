@@ -1,3 +1,9 @@
+# @title      Secure Boot
+# @title.tr   Secure Boot
+# @timeout    1200
+# @weight     5
+# @exports    MAZE_SB_ESP
+
 # No systemd-boot BLS entries to patch: /etc/kernel/install.conf ships
 # layout=uki, so kernel-install never writes loader/entries/*.conf — the full
 # PARAMS set is already embedded in the UKI via /etc/kernel/cmdline (written

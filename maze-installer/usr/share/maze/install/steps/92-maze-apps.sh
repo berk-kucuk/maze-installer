@@ -1,3 +1,9 @@
+# @title      System update and Maze applications
+# @title.tr   Sistem güncellemesi ve Maze uygulamaları
+# @timeout    5400
+# @weight     25
+# @exports    MAZE_TARGET_SYNCED
+
 # 10) Install Maze's own applications from the [mazelinux] repo (fast, reliable).
 install_maze_repo_apps
 

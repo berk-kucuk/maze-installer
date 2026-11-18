@@ -1,11 +1,23 @@
+# @library    sourced at the start of every step (idempotent)
+
 log()  { printf '[maze-deploy] %s\n' "$*"; }
 # Every warning is also collected (with the step it came from) so the driver can
 # list them all at the end — one place to look, instead of a line lost somewhere
 # in a thousand lines of output. MAZE_WARNINGS/MAZE_CRITICAL/MAZE_STEP are set up
 # by deploy-to-target.sh; the defaults keep a step usable when sourced alone.
+#
+# Each step runs in its own process, so the driver cannot read these arrays
+# afterwards: they are also appended, one line each, to MAZE_WARN_FILE /
+# MAZE_CRITICAL_FILE as they happen — a step that crashes later still leaves
+# every warning it gave on record.
+_maze_record() {
+    [[ -n "${1:-}" ]] || return 0
+    printf '[%s] %s\n' "${MAZE_STEP:-?}" "${*:2}" | tr -d '\r' | paste -sd ' ' >> "$1" 2>/dev/null || true
+}
 warn() {
     printf '[maze-deploy] WARNING: %s\n' "$*" >&2
     MAZE_WARNINGS+=("[${MAZE_STEP:-?}] $*")
+    _maze_record "${MAZE_WARN_FILE:-}" "$@"
 }
 # A problem that makes the installed system unsafe or unbootable. Recorded, the
 # remaining steps still run (so the logs and the target are as complete as they
@@ -14,6 +26,24 @@ warn() {
 critical() {
     printf '[maze-deploy] CRITICAL: %s\n' "$*" >&2
     MAZE_CRITICAL+=("[${MAZE_STEP:-?}] $*")
+    _maze_record "${MAZE_CRITICAL_FILE:-}" "$@"
+}
+
+# Is security feature $1 selected? (85-services, 70-cmdline-uki). SECURITY_CSV is
+# set by 00-setup; empty or "all" means every feature, "none" none of them.
+sec_selected() {
+    local key="$1"
+    # Empty OR the literal "all" both mean "every security feature is on".
+    # Calamares invokes this script with the security CSV as "all" for the
+    # default install. Without the "all" case, sec_selected would treat "all" as
+    # a feature name matching nothing, so EVERY real feature (apparmor, firewalld,
+    # fail2ban, macchanger, …) would read as unselected — silently not enabling
+    # them.
+    [[ -z "${SECURITY_CSV}" || "${SECURITY_CSV}" == "all" ]] && return 0
+    case ",${SECURITY_CSV}," in
+        *",${key},"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # stdin from /dev/null so a chroot command (e.g. chsh's PAM prompt) can never
@@ -48,9 +78,35 @@ in_chroot() { arch-chroot "${TARGET}" env SNAP_PAC_SKIP=y "$@" </dev/null; }
 # Returns non-zero if the system could not be brought up to date; callers then
 # skip their network installs instead of doing them on a half-synced system.
 MAZE_TARGET_SYNCED=0
+
+# "Fastest mirrors" (Options page): rank the mirrors before the big update. The
+# ISO's mirrorlist is whatever it was at build time — often slow or stale from
+# where the user is. reflector runs inside the target, keeps only HTTPS mirrors
+# synced in the last 6 hours and picks the 10 fastest of the 20 freshest. The
+# new list replaces the old one only if it really lists servers; on any failure
+# (offline, a timeout, reflector missing) the existing list stays as it was.
+pick_fastest_mirrors() {
+    maze_option reflector off || return 0
+    local _ml="${TARGET}/etc/pacman.d/mirrorlist"
+    if ! in_chroot sh -c 'command -v reflector' >/dev/null 2>&1; then
+        warn "reflector is not on the target; keeping the existing mirror list"
+        return 0
+    fi
+    log "Picking the fastest up-to-date mirrors (reflector)"
+    if timeout 240 arch-chroot "${TARGET}" reflector --protocol https --age 6 --latest 20 \
+            --fastest 10 --sort rate --save /etc/pacman.d/mirrorlist.maze-new </dev/null >/dev/null 2>&1 \
+       && grep -q '^[[:space:]]*Server[[:space:]]*=' "${_ml}.maze-new" 2>/dev/null; then
+        mv -f "${_ml}.maze-new" "${_ml}" && log "Mirror list updated ($(grep -c '^[[:space:]]*Server' "${_ml}") mirrors)"
+    else
+        rm -f "${_ml}.maze-new" 2>/dev/null || true
+        warn "could not rank the mirrors; keeping the existing mirror list"
+    fi
+}
+
 sync_upgrade_target() {
     [[ "${MAZE_TARGET_SYNCED}" -eq 1 ]] && return 0
     local _try _k _newer
+    pick_fastest_mirrors
     log "Bringing the installed system up to date with the repos (pacman -Syu)"
     for _try in 1 2 3; do
         _newer=()

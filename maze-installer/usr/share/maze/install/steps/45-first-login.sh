@@ -1,3 +1,9 @@
+# @title      First-login setup
+# @title.tr   İlk giriş ayarları
+# @timeout    300
+# @weight     1
+# @exports    MAZE_AVATAR_SRC
+
 # 2d) Maze wallpaper on the installed system --------------------------------
 # Patch the Plasma defaults so "Maze" is the default wallpaper (covers fresh
 # profiles / fallback when the live containment's plugin is unavailable).

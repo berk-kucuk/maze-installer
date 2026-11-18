@@ -1,3 +1,5 @@
+# @library    sourced at the start of every step (idempotent)
+
 # Maze's OWN applications (entropy-shield, qlam, maze, ...) now ship from the
 # official [mazelinux] pacman repo — added to the target's pacman.conf in step
 # 7b — so they are installed with a plain 'pacman -S' instead of being built from
@@ -78,7 +80,7 @@ install_aur_packages() {
 
     log "Installing AUR packages from the AUR (makepkg): ${aur_list[*]:-<none>}"
     local build_user
-    build_user=$(in_chroot awk -F: '$3>=1000 && $3<65000 {print $1; exit}' /etc/passwd 2>/dev/null)
+    build_user=$(in_chroot awk -F: '$3>=1000 && $3<65000 && $1!="ghost" {print $1; exit}' /etc/passwd 2>/dev/null)
     if [[ -z "${build_user}" || ${#aur_list[@]} -eq 0 ]]; then
         warn "no regular user found; skipping AUR install (run maze-aur-setup after login)"
         return 0
@@ -141,15 +143,12 @@ retry() {
 
 cmd="${1:-}"; shift || true
 case "${cmd}" in
-    clone)      # clone PKG DIR [COMMIT]
+    clone)      # clone PKG DIR COMMIT — only ever a pinned commit
         pkg="$1" dir="$2" pin="${3:-}"
-        if [[ -n "${pin}" ]]; then
-            retry 3 git clone "https://aur.archlinux.org/${pkg}.git" "${dir}" || exit 1
-            git -C "${dir}" -c advice.detachedHead=false checkout --quiet --detach "${pin}" >>"${VLOG}" 2>&1 || exit 1
-            [[ "$(git -C "${dir}" rev-parse HEAD)" == "${pin}"* ]] || { echo "   -> pinned commit mismatch for ${pkg}"; exit 1; }
-        else
-            retry 3 git clone --depth 1 "https://aur.archlinux.org/${pkg}.git" "${dir}" || exit 1
-        fi
+        [[ "${pin}" =~ ^[0-9a-f]{40}$ ]] || { echo "   -> no pinned commit for ${pkg}"; exit 1; }
+        retry 3 git clone "https://aur.archlinux.org/${pkg}.git" "${dir}" || exit 1
+        git -C "${dir}" -c advice.detachedHead=false checkout --quiet --detach "${pin}" >>"${VLOG}" 2>&1 || exit 1
+        [[ "$(git -C "${dir}" rev-parse HEAD)" == "${pin}" ]] || { echo "   -> pinned commit mismatch for ${pkg}"; exit 1; }
         ;;
     srcinfo)    # srcinfo DIR -> dependency specs on stdout, one per line
         cd "$1" || exit 1
@@ -165,8 +164,15 @@ MAKEPKG
     chmod 755 "${helper}"
     in_chroot chown "${build_user}:${build_user}" "${helper_in_chroot}" 2>/dev/null || true
 
-    # Optional review pins: "<pkg> <full commit hash>" per line, # comments.
-    local pins_file="${MAZE_STEP_DIR:-$(dirname "${BASH_SOURCE[0]}")}/../aur-pins"
+    # Pinned commits, "<pkg> <40-hex commit>" per line (# comments). build.sh
+    # writes this file from the AUR clones the ISO itself was built from, so
+    # what runs here is the code already on the ISO. A package with no pin is
+    # NOT built: its PKGBUILD runs as the build user and its .install
+    # scriptlet as root, and an unpinned clone is whatever the AUR serves
+    # today — a hijacked or freshly adopted package would own every new
+    # install. Such a package is left for the user to install with paru,
+    # which shows the PKGBUILD before building.
+    local pins_file="${MAZE_AUR_PINS:-/usr/share/maze/aur-pins}"
     declare -A _aur_pin=()
     if [[ -r "${pins_file}" ]]; then
         local _p _c
@@ -176,24 +182,34 @@ MAKEPKG
         done < "${pins_file}"
     fi
 
+    if [[ ! -r "${pins_file}" ]]; then
+        warn "no AUR pin list at ${pins_file}: no AUR package will be built during the install"
+    fi
+
     local aur_log="${TARGET}/var/log/maze-aur-install.log"
     : > "${aur_log}"
     _aur_user() { in_chroot sudo -u "${build_user}" -H bash "${helper_in_chroot}" "$@"; }
 
-    # Root half of one package. Returns 0 on success.
+    # Root half of one package. Returns 0 on success, 1 on failure, 3 when
+    # the package has no pin and is therefore not built (see above).
     _aur_build_one() {
         local pkg="$1" tmp deps missing pkgfiles=() _pf
         if in_chroot pacman -Qq "${pkg}" >/dev/null 2>&1; then
             echo "   -> ${pkg} already installed (copied from the ISO); skipping AUR build."
             return 0
         fi
+        if [[ -z "${_aur_pin[${pkg}]:-}" ]]; then
+            echo "   -> ${pkg} has no pinned commit: not building unreviewed AUR code during the install."
+            echo "      Install it later with paru (it shows the PKGBUILD first) or makepkg, after reading the PKGBUILD."
+            return 3
+        fi
         # In the user's home, not /tmp: arch-chroot mounts a fresh tmpfs on
         # /tmp for every invocation, so a directory made there in one call is
         # gone in the next.
         tmp=$(in_chroot sudo -u "${build_user}" mktemp -d -p "${build_home}" .maze-aur.XXXXXX) || return 1
         local dir="${tmp}/${pkg}"
-        [[ -n "${_aur_pin[${pkg}]:-}" ]] && echo "   (pinned to ${_aur_pin[${pkg}]:0:12})"
-        if ! _aur_user clone "${pkg}" "${dir}" "${_aur_pin[${pkg}]:-}"; then
+        echo "   (pinned to ${_aur_pin[${pkg}]:0:12})"
+        if ! _aur_user clone "${pkg}" "${dir}" "${_aur_pin[${pkg}]}"; then
             in_chroot rm -rf "${tmp}"; return 1
         fi
         mapfile -t deps < <(_aur_user srcinfo "${dir}")
@@ -228,12 +244,16 @@ MAKEPKG
     }
 
     log "Installing AUR packages now — progress follows (full details in /var/log/maze-aur-install.log):"
-    local _aur_rc=0 failed=() i=0 total=${#aur_list[@]} pkg
+    local _aur_rc=0 failed=() unpinned=() i=0 total=${#aur_list[@]} pkg _rc
     for pkg in "${aur_list[@]}"; do
         ((i++))
         echo ":: (${i}/${total}) Installing ${pkg} from the AUR..." | tee -a "${aur_log}"
-        if _aur_build_one "${pkg}"; then
+        _aur_build_one "${pkg}" 2>&1 | tee -a "${aur_log}"
+        _rc=${PIPESTATUS[0]}
+        if (( _rc == 0 )); then
             echo "   -> ${pkg} installed." | tee -a "${aur_log}"
+        elif (( _rc == 3 )); then
+            unpinned+=("${pkg}")
         else
             echo "   -> ERROR: ${pkg} failed (see /var/log/maze-aur-install.log)." | tee -a "${aur_log}"
             _aur_rc=1; failed+=("${pkg}")
@@ -242,7 +262,11 @@ MAKEPKG
     # AUR helper fallback: paru requested but missing -> try yay (also from source).
     if printf '%s\n' "${aur_list[@]}" | grep -qx paru && ! in_chroot pacman -Qq paru >/dev/null 2>&1; then
         echo ":: paru not installed — falling back to yay as the AUR helper..." | tee -a "${aur_log}"
-        if _aur_build_one yay; then
+        _aur_build_one yay 2>&1 | tee -a "${aur_log}"
+        _rc=${PIPESTATUS[0]}
+        if (( _rc == 3 )); then
+            unpinned+=(yay)
+        elif (( _rc == 0 )); then
             echo "   -> yay installed (paru fallback)." | tee -a "${aur_log}"
             local _kept=() _x
             for _x in "${failed[@]}"; do [[ "${_x}" == paru ]] || _kept+=("${_x}"); done
@@ -261,6 +285,9 @@ MAKEPKG
     fi
     if [[ "${_aur_rc}" -ne 0 ]]; then
         warn "AUR install had failures (${failed[*]}) — see /var/log/maze-aur-install.log (or run 'maze-aur-setup' after login)"
+    fi
+    if (( ${#unpinned[@]} )); then
+        warn "not built (no pinned AUR commit): ${unpinned[*]} — install with paru (or makepkg) after first boot"
     fi
     rm -f "${helper}"
 }

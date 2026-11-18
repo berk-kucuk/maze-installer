@@ -1,3 +1,8 @@
+# @title      Locking the root account
+# @title.tr   Root hesabı kilitleniyor
+# @timeout    300
+# @weight     1
+
 # 3a-bis) Lock the root account -----------------------------------------------
 #
 # The live ISO ships root with an EMPTY password (`root::` in airootfs/etc/shadow)

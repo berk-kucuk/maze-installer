@@ -1,0 +1,9 @@
+# Maze Linux — finalise the installed system (deploy-to-target.sh, step by step).
+# Syntax is YAML 1.2
+---
+type:       "job"
+name:       "mazedeploy"
+interface:  "python"
+script:     "main.py"
+# The longest job by far (system update, AUR builds): give it most of the bar.
+weight:     40

@@ -1,3 +1,8 @@
+# @title      Desktop configuration
+# @title.tr   Masaüstü yapılandırması
+# @timeout    600
+# @weight     1
+
 # ---------------------------------------------------------------------------
 log "Deploying Maze configuration to ${TARGET}"
 

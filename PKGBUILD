@@ -2,8 +2,8 @@
 #
 # maze-installer — Maze Linux's Calamares-based installer, extracted from the
 # ISO's airootfs overlay into a pacman package. Ships the launcher, the whole
-# Calamares config + Maze branding, and deploy-to-target.sh (all Maze install
-# logic). Live-medium package: it is what turns "Install Maze Linux" into a
+# Calamares config + Maze branding (QML sidebar/navigation), the mazedeploy job
+# module, and deploy-to-target.sh (all Maze install logic, step by step). Live-medium package: it is what turns "Install Maze Linux" into a
 # finished install.
 #
 # Payload lives verbatim under ./maze-installer/ (a mirror of the target
@@ -11,8 +11,8 @@
 # current locations so the package is a drop-in for the airootfs files.
 
 pkgname=maze-installer
-pkgver=2.1.4
-pkgrel=1
+pkgver=2.2.0
+pkgrel=15
 pkgdesc="Maze Linux Calamares installer — launcher, config, branding and deploy-to-target logic"
 arch=('any')
 url="https://mazelinux.berkkucukk.com.tr"
@@ -21,6 +21,11 @@ depends=(
   'calamares'
   'polkit'
   'xorg-xhost'
+  # Lets the partition page name the systems already on the disk ("This
+  # computer has Windows 11 on it") for "Install alongside" / "Replace".
+  # Without it Calamares logs "os-prober cannot start" and leaves those labels
+  # blank. Removed from the installed system with maze-installer (40-live-residue).
+  'os-prober'
 )
 optdepends=(
   'maze-branding: Plymouth/SDDM theming applied to the installed system'
@@ -36,6 +41,7 @@ package() {
   cp -a "${startdir}/maze-installer/usr" "${pkgdir}/usr"
   chmod 755 "${pkgdir}/usr/local/bin/maze-calamares"
   chmod 755 "${pkgdir}/usr/share/maze/install/deploy-to-target.sh"
+  chmod 755 "${pkgdir}/usr/share/maze/install/preflight.py"
   chmod 755 "${pkgdir}/usr/local/share/maze/calamares-mount-api.sh"
   chmod 755 "${pkgdir}/usr/local/share/maze/calamares-strip-keyfile.sh"
 }

@@ -1,3 +1,5 @@
+# @library    sourced at the start of every step (idempotent)
+
 set -uo pipefail
 
 TARGET="${1:?usage: deploy-to-target.sh <target-mountpoint> [security-csv]}"
@@ -30,58 +32,61 @@ rm -f "${TARGET}/etc/sudoers.d/99-maze-build" 2>/dev/null || true
 
 # Maze apps are on the live ISO (copied by unpackfs) — always install all.
 MAZE_APPS_CSV="all"
-# Comma-separated list of selected extra packages (AUR + qemu).
-# Extras packagechooser page was REMOVED — never install extras.
-EXTRAS_CSV="none"
 
 # VMware was removed from the installer entirely — vmware-workstation is an AUR
 # package that never builds in the offline/chroot install. It is installed on
 # demand post-install via the `maze-install-vmware` command (maze-tools).
 
-# Comma-separated list of selected security features (from the installer's
-# Security section). Empty/unset means "all" (handled below).
+# Comma-separated list of selected security features (85-services). Empty or
+# "all" means every feature; "none" means none. The Options page decides it
+# (mazedeploy passes it here), otherwise Calamares passes "all".
 SECURITY_CSV="${2:-}"
-# Curated AUR apps that ship with the Maze desktop — filtered by the user's
-# selection on the Extras packagechooser page (EXTRAS_CSV). All are included
-# when the selection file is missing (backward compatibility with direct calls).
+
+# maze_option NAME on|off — is option NAME ticked on the installer's Options
+# page (netinstall@mazeoptions)? mazedeploy passes the ticked ids in
+# MAZE_OPTIONS ("opt-apparmor opt-tor ..."). When it is not set at all — a
+# direct run, the tests, a Calamares config without the page — the second
+# argument decides, and every default here is the behaviour from before the
+# page existed.
+maze_option() {
+    if [[ -z "${MAZE_OPTIONS+x}" ]]; then
+        [[ "$2" == on ]]
+        return
+    fi
+    [[ " ${MAZE_OPTIONS} " == *" opt-$1 "* ]]
+}
+
+# Third-party apps from the AUR.
 #
-# 'paru' normally ships on the ISO (MazeLinux/packages.x86_64, built from
-# source by tools/build-aur.sh against the ISO's own libalpm), so the AUR step
-# finds it installed and skips it. It stays in this list as the fallback: an
-# ISO built without it still gets paru, compiled here FROM SOURCE (never
-# paru-bin, which breaks after a pacman soname bump). Listed first so the AUR
-# helper is in place early.
-CURATED_AUR_TEMPLATE=(paru upscayl-bin session-desktop-bin joplin-bin onlyoffice-bin claude-code)
-CURATED_AUR=()
-if [[ -z "${EXTRAS_CSV}" ]]; then
-    # No selection file (legacy/direct call): install everything.
-    CURATED_AUR=("${CURATED_AUR_TEMPLATE[@]}")
+# 'paru' always comes first and always stays: it is the AUR helper. It
+# normally ships on the ISO (MazeLinux/packages.x86_64, built from source by
+# tools/build-aur.sh against the ISO's own libalpm), so the AUR step finds it
+# installed and skips it; otherwise it is built here FROM SOURCE (never
+# paru-bin, which breaks after a pacman soname bump).
+#
+# onlyoffice-bin is deliberately kept OFF the ISO for size, so it is the one
+# app actually downloaded and built during the install. joplin-bin,
+# upscayl-bin, session-desktop-bin and claude-code are prebuilt on the ISO and
+# arrive with unpackfs; listing them costs nothing (the AUR step skips what is
+# installed) and builds them if an ISO ever lacks one.
+#
+# Each one can be unticked on the Options page: it is then neither built nor
+# kept — 94-aur removes the copy unpackfs brought (MAZE_AUR_REMOVE). Without
+# the page: paru + onlyoffice-bin, exactly as before.
+CURATED_AUR=(paru)
+MAZE_AUR_REMOVE=()
+if [[ -z "${MAZE_OPTIONS+x}" ]]; then
+    CURATED_AUR+=(onlyoffice-bin)
 else
-    for pkg in "${CURATED_AUR_TEMPLATE[@]}"; do
-        # Match the pkg name against the comma-separated CSV.
-        if [[ ",${EXTRAS_CSV}," == *",${pkg},"* ]]; then
-            CURATED_AUR+=("${pkg}")
+    for _app in onlyoffice-bin joplin-bin upscayl-bin session-desktop-bin claude-code; do
+        if maze_option "app-${_app}" on; then
+            CURATED_AUR+=("${_app}")
+        else
+            MAZE_AUR_REMOVE+=("${_app}")
         fi
     done
 fi
-# These must be present on EVERY installed system regardless of the (removed)
-# Extras page selection — otherwise EXTRAS_CSV="none" leaves CURATED_AUR empty
-# and neither would ever be installed:
-#   - paru: the AUR helper. Normally already on the target (shipped on the ISO);
-#     otherwise built from source here so it matches the target's libalpm ABI
-#     (unlike paru-bin, which breaks after a pacman soname bump).
-#   - onlyoffice-bin: deliberately kept OFF the ISO for size, so it must be
-#     installed here (needs network at install time).
-# NOTE the reversed order: this loop PREPENDS, so iterating onlyoffice-bin first
-# leaves paru at the head of the list. Written the other way round (paru first)
-# it produced "onlyoffice-bin paru" — the exact opposite of the intent above, and
-# onlyoffice-bin is a ~350 MB download with a 30-minute build ceiling and one
-# retry, so a slow mirror could hold the AUR helper back for an hour.
-for _always in onlyoffice-bin paru; do
-    if ! printf '%s\n' "${CURATED_AUR[@]}" | grep -qx "${_always}"; then
-        CURATED_AUR=("${_always}" "${CURATED_AUR[@]}")
-    fi
-done
+
 # Maze's OWN applications, shipped from the [mazelinux] repo. Calamares (the
 # only caller of this script) always passes the keyword "all", installing the
 # whole set below.

@@ -1,0 +1,8 @@
+# Maze Linux — stop an install that cannot work before it changes the disk.
+# Syntax is YAML 1.2
+---
+type:       "job"
+name:       "mazepreflight"
+interface:  "python"
+script:     "main.py"
+weight:     1

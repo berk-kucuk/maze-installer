@@ -1,3 +1,5 @@
+# @library    sourced at the start of every step (idempotent)
+
 # Secure Boot (shim + per-machine MOK):
 #   firmware -> shim (Microsoft-signed, \EFI\BOOT\BOOTX64.EFI)
 #            -> grubx64.efi = the Unified Kernel Image (kernel + initramfs +
@@ -55,9 +57,13 @@ setup_secure_boot() {
     cp -f "${live_shim}" "${keydir}/shimx64.efi" 2>/dev/null || true
     [[ -f "${live_mm}" ]] && cp -f "${live_mm}" "${keydir}/mmx64.efi" 2>/dev/null || true
 
-    # 1) Per-machine MOK key.
+    # 1) Per-machine MOK key. RSA-3072: what NIST counts as strong past 2030
+    #    (2048 is not), and shim — which checks these signatures, not the
+    #    firmware — verifies it with OpenSSL like any other size. Ten years
+    #    stays: shim has no trusted clock at boot and ignores expiry, so a
+    #    shorter life protects nothing; rotating is maze-sb-rotate-key's job.
     if [[ ! -f "${keydir}/MOK.key" ]]; then
-        if ! in_chroot openssl req -newkey rsa:2048 -nodes \
+        if ! in_chroot openssl req -newkey rsa:3072 -nodes \
                 -keyout /var/lib/maze-secureboot/MOK.key -new -x509 -sha256 -days 3650 \
                 -subj "/CN=Maze Linux Secure Boot machine key/" \
                 -out /var/lib/maze-secureboot/MOK.crt >/dev/null 2>&1; then
@@ -215,6 +221,32 @@ keys are left untouched; kernel updates are re-signed automatically.
 Certificate:  /var/lib/maze-secureboot/MOK.cer  (also at the ESP root /MOK.cer)
 Check status:  mokutil --sb-state
 SBNOTE
+
+    # 6) Say so when the disk is not encrypted. The private key lives on the
+    #    root file system; without encryption anyone who can take the disk out
+    #    copies it and signs their own boot images, and Secure Boot cannot tell
+    #    theirs from ours. Secure Boot is still configured — it still stops
+    #    changed images from software on the running system — but the user must
+    #    not believe it protects against more than that.
+    local _root_src
+    _root_src="$(findmnt -no SOURCE -T "${keydir}" 2>/dev/null | sed 's/\[.*\]$//')"
+    if [[ -n "${_root_src}" ]] && ! lsblk -nso TYPE "${_root_src}" 2>/dev/null | grep -qx crypt; then
+        warn "Secure Boot: the disk is NOT encrypted — the signing key on it is readable by anyone with physical access to the disk"
+        cat >> "${TARGET}/var/lib/maze-secureboot/ENROLLMENT.txt" <<'SBPLAIN'
+
+IMPORTANT — this disk is not encrypted
+--------------------------------------
+The key that signs this computer's boot images is stored on its disk. Without
+disk encryption, anyone who can take the disk out (or start the computer from
+another system) can copy that key and sign a boot image of their own, which
+this computer will then trust. Secure Boot still stops changed boot images
+from software running on this system, but it does NOT protect against someone
+with physical access to the disk.
+
+To be protected against that too, re-install Maze with disk encryption.
+"sudo maze-boot-check" shows this status at any time.
+SBPLAIN
+    fi
 
     log "Secure Boot configured. Enroll MOK.cer via MokManager on first boot (no password)."
 }

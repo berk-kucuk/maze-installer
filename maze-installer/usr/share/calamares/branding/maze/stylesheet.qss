@@ -1,260 +1,408 @@
-/* Maze Linux — Calamares stylesheet: dark-grey surface, off-white buttons. */
+/* Maze Linux — Calamares stylesheet (OLED theme).
+ *
+ * The sidebar and the Back/Next bar are QML (calamares-sidebar.qml,
+ * calamares-navigation.qml); this file styles the pages between them.
+ *
+ * Palette — QSS has no variables, so these are repeated by value below:
+ *   page        #0e0e10      surface     #161619      surface-hover  #1d1d21
+ *   border      #2c2c32      border-hi   #3e3e46      focus          #d8d8de
+ *   text        #ececf0      muted       #9a9aa2      disabled       #55555c
+ *   primary     #e6e6ea  on-primary #0b0b0c
+ *
+ * Calamares runs as ROOT with the default LIGHT Qt palette, so anything not
+ * styled here comes out light-on-white. Several rules below exist only to
+ * stop that (tooltips, combo popups, item-view delegates); each says why.
+ *
+ * url() paths are absolute: QSS resolves relative ones against the working
+ * directory, not this file.
+ */
 
+/* ----- surfaces & text ---------------------------------------------------- */
 #mainApp,
 QWidget {
-    background-color: #0e0e0e;
-    color: #f2f2f2;
+    background-color: #0e0e10;
+    color: #ececf0;
+    font-size: 10pt;
+}
+QLabel {
+    background: transparent;
+    color: #ececf0;
+}
+QLabel:disabled {
+    color: #55555c;
 }
 
-/* Tooltips — Calamares runs as root with the light palette (yellow background).
-   Force dark-grey so they match the OLED theme. */
+/* Tooltips — root's light palette would make them yellow. */
 QToolTip {
-    background-color: #1c1c1c;
-    color: #eaeaea;
-    border: 1px solid rgba(255,255,255,0.14);
-    padding: 4px 8px;
+    background-color: #1d1d21;
+    color: #ececf0;
+    border: 1px solid #3e3e46;
+    border-radius: 6px;
+    padding: 5px 9px;
 }
 
-/* Sidebar (step list) — a touch darker than the main surface for separation. */
-#sidebarApp {
-    background-color: #070707;
-    border-right: 1px solid rgba(255,255,255,0.08);
-}
-#sidebarMenuApp {
-    background-color: #070707;
-    border: none;
-}
-/* Kill the thin separator line Calamares draws between the sidebar logo and the
-   step list — match it to the sidebar background so it becomes invisible. */
-#sidebarApp QFrame {
-    border: none;
-    color: #070707;
-}
-QWidget#sidebarApp QLabel {
-    color: #a8a8a8;
-}
-
-/* Headings / text */
-QLabel[text] {
-    color: #f2f2f2;
-}
-
-/* Buttons — soft OFF-WHITE (dirty white), not pure white, with dark text. */
-QPushButton {
-    background-color: #e6e6e6;
-    color: #1a1a1a;
-    border: none;
+/* Context menus (e.g. right-click in the manual partitioning table). */
+QMenu {
+    background-color: #161619;
+    border: 1px solid #2c2c32;
     border-radius: 8px;
-    padding: 8px 20px;
-    font-weight: 700;
+    padding: 4px;
+}
+QMenu::item {
+    padding: 6px 18px;
+    border-radius: 5px;
+}
+QMenu::item:selected {
+    background-color: #e6e6ea;
+    color: #0b0b0c;
+}
+QMenu::separator {
+    height: 1px;
+    background: #2c2c32;
+    margin: 4px 6px;
+}
+
+/* ----- buttons -------------------------------------------------------------
+   Every button inside a page is SECONDARY (outlined): the one primary action
+   on screen is Next/Install in the navigation bar. The exception is a
+   dialog's default button ("Yes, install", "OK"), which is filled. */
+QPushButton {
+    background-color: #161619;
+    color: #ececf0;
+    border: 1px solid #2c2c32;
+    border-radius: 8px;
+    padding: 7px 16px;
+    min-height: 20px;
+    font-weight: 600;
 }
 QPushButton:hover {
-    background-color: #d4d4d4;
+    background-color: #1d1d21;
+    border-color: #3e3e46;
 }
 QPushButton:pressed {
-    background-color: #c8c8c8;
+    background-color: #26262b;
+}
+QPushButton:focus {
+    border-color: #d8d8de;
 }
 QPushButton:disabled {
-    background-color: rgba(255,255,255,0.10);
-    color: rgba(255,255,255,0.38);
+    background-color: transparent;
+    color: #55555c;
+    border-color: #1f1f23;
+}
+QPushButton:default,
+QDialogButtonBox QPushButton:default {
+    background-color: #e6e6ea;
+    color: #0b0b0c;
+    border: none;
+}
+QPushButton:default:hover {
+    background-color: #f5f5f7;
+}
+QPushButton:default:pressed {
+    background-color: #c9c9cf;
+}
+QToolButton {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px;
+}
+QToolButton:hover {
+    background-color: #1d1d21;
+    border-color: #2c2c32;
 }
 
-/* Inputs — frosted-glass on the dark-grey surface. */
+/* ----- text inputs -------------------------------------------------------- */
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {
-    background-color: rgba(255,255,255,0.06);
+    background-color: #161619;
     color: #ffffff;
-    border: 1px solid rgba(255,255,255,0.14);
+    border: 1px solid #2c2c32;
     border-radius: 8px;
-    padding: 6px 9px;
-    selection-background-color: #e6e6e6;
-    selection-color: #1a1a1a;
+    padding: 7px 10px;
+    selection-background-color: #e6e6ea;
+    selection-color: #0b0b0c;
 }
-QLineEdit:focus, QComboBox:focus {
-    border: 1px solid #e6e6e6;
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover {
+    border-color: #3e3e46;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {
+    border-color: #d8d8de;
+}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {
+    color: #55555c;
+    background-color: #111113;
+    border-color: #1f1f23;
+}
+QLineEdit[readOnly="true"] {
+    background-color: #111113;
+}
+/* Password dots: the small centred bullet, not the large disc that sits low. */
+QLineEdit {
+    lineedit-password-character: 8226;
+}
+/* The partition page's "Encrypt system" row: Calamares fixes the row's height
+   to the passphrase field's height at the moment it is built — before this
+   stylesheet applies, i.e. Qt's default 30 px (EncryptWidget.cpp:
+   setFixedHeight(...) "Avoid jumping up and down"). With the 7 px padding
+   above, the fields want ~36 px, are squeezed into 30, and the dots end up at
+   the bottom with their lower half cut off. Keep these two inside 30 px. */
+#m_passphraseLineEdit, #m_confirmLineEdit {
+    padding: 1px 10px;
 }
 
-/* Force the item-view popup instead of a native one, so the QSS below is
-   ALWAYS honoured. Calamares runs as root with the default (light) Qt palette,
-   so a native combo popup paints its frame/items from that light palette and
-   the options end up on a white background. combobox-popup:0 makes Qt use the
-   stylable list popup. */
+/* ----- combo boxes ---------------------------------------------------------
+   combobox-popup:0 forces the stylable list popup instead of a native one:
+   the native popup paints from root's LIGHT palette, which left the options
+   on a white background. */
 QComboBox {
     combobox-popup: 0;
+    padding-right: 30px;
 }
-
-/* Drop-down POPUP list (e.g. the swap / filesystem choice). Without this the
-   items render on a white background (root's light palette) and are unreadable;
-   give the popup a dark surface AND set explicit per-item colours (the delegate
-   otherwise fills each item from the light palette, leaving white-behind-the-
-   options even when the view background is dark). */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 28px;
+    border: none;
+    background: transparent;
+}
+QComboBox::down-arrow {
+    image: url("/usr/share/calamares/branding/maze/chevron-down.svg");
+    width: 12px;
+    height: 12px;
+}
 QComboBox QAbstractItemView {
-    background-color: #1a1a1a;
-    color: #f2f2f2;
-    border: 1px solid rgba(255,255,255,0.16);
-    selection-background-color: #e6e6e6;
-    selection-color: #1a1a1a;
+    background-color: #161619;
+    color: #ececf0;
+    border: 1px solid #3e3e46;
+    border-radius: 6px;
+    selection-background-color: #e6e6ea;
+    selection-color: #0b0b0c;
     outline: 0;
     padding: 4px;
 }
+/* Per-item colours too: the delegate otherwise fills each row from the light
+   palette, leaving white behind the options even on a dark view. */
 QComboBox QAbstractItemView::item {
-    background-color: #1a1a1a;
-    color: #f2f2f2;
+    background-color: #161619;
+    color: #ececf0;
     padding: 6px 10px;
-    min-height: 20px;
+    min-height: 22px;
     border: none;
+    border-radius: 5px;
 }
 QComboBox QAbstractItemView::item:selected,
 QComboBox QAbstractItemView::item:hover {
-    background-color: #e6e6e6;
-    color: #1a1a1a;
+    background-color: #e6e6ea;
+    color: #0b0b0c;
 }
 
-/* Welcome page — system-requirements WARNINGS at the very start of the install.
-   Calamares' ResultDelegate paints each failed-requirement row with a colour it
-   derives from the *Qt palette* window colour: amber (H=60) for soft warnings,
-   red (H=0) for hard failures. Calamares runs as root with the default LIGHT
-   palette, so those tints come out pale (pale-yellow / pale-red), while the row
-   text is drawn in QPalette::Text — which our global input rule had set to
-   white, giving unreadable white-on-pale-yellow. QSS can't change the delegate's
-   palette-derived background, but it CAN set the Text role: scope DARK text to
-   just this list (it only ever lists FAILED requirements) so the warnings are
-   legible. Other item views (partition tree, combo popups) keep light-on-dark.
-   The class selector 'ResultsListWidget' is Calamares' welcome-checker widget. */
+/* ----- check boxes & radio buttons ----------------------------------------- */
+QCheckBox, QRadioButton {
+    background: transparent;
+    color: #ececf0;
+    spacing: 10px;
+    padding: 3px 0px;
+}
+QCheckBox:disabled, QRadioButton:disabled {
+    color: #55555c;
+}
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid #5a5a63;
+    background-color: #161619;
+}
+QCheckBox::indicator {
+    border-radius: 5px;
+}
+QRadioButton::indicator {
+    border-radius: 10px;
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #9a9aa2;
+    background-color: #1d1d21;
+}
+QCheckBox::indicator:checked {
+    background-color: #e6e6ea;
+    border-color: #e6e6ea;
+    image: url("/usr/share/calamares/branding/maze/checkmark.svg");
+}
+QRadioButton::indicator:checked {
+    background-color: #e6e6ea;
+    border-color: #e6e6ea;
+    image: url("/usr/share/calamares/branding/maze/radio-dot.svg");
+}
+QCheckBox::indicator:checked:hover, QRadioButton::indicator:checked:hover {
+    background-color: #f5f5f7;
+    border-color: #f5f5f7;
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    border-color: #2c2c32;
+    background-color: transparent;
+}
+
+/* ----- lists, trees, tables -------------------------------------------------
+   Locale/keyboard lists, the manual-partitioning table, the summary. Qt paints
+   the item-view check boxes from the VIEW's palette (root's light one), which
+   gave invisible ticks — hence the explicit ::indicator rules. */
+QListView, QTreeView, QTableView {
+    background-color: #111113;
+    alternate-background-color: #141416;
+    color: #ececf0;
+    border: 1px solid #222226;
+    border-radius: 8px;
+    outline: 0;
+    selection-background-color: #26262b;
+    selection-color: #ffffff;
+}
+QListView {
+    padding: 4px;
+}
+QListView::item {
+    padding: 7px 10px;
+    border-radius: 6px;
+    color: #ececf0;
+}
+QTreeView::item, QTableView::item {
+    padding: 5px 6px;
+}
+QListView::item:hover, QTreeView::item:hover, QTableView::item:hover {
+    background-color: #18181b;
+}
+QListView::item:selected, QTreeView::item:selected, QTableView::item:selected {
+    background-color: #e6e6ea;
+    color: #0b0b0c;
+}
+QListView::indicator, QTreeView::indicator {
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid #5a5a63;
+    background-color: #161619;
+    border-radius: 5px;
+}
+QListView::indicator:checked, QTreeView::indicator:checked {
+    background-color: #e6e6ea;
+    border-color: #e6e6ea;
+    image: url("/usr/share/calamares/branding/maze/checkmark.svg");
+}
+/* Partly ticked group (the Options page): without this it looks UNticked. */
+QListView::indicator:indeterminate, QTreeView::indicator:indeterminate,
+QCheckBox::indicator:indeterminate {
+    background-color: #9a9aa2;
+    border-color: #9a9aa2;
+    image: url("/usr/share/calamares/branding/maze/dash.svg");
+}
+QHeaderView {
+    background-color: transparent;
+    border: none;
+}
+QHeaderView::section {
+    background-color: #141416;
+    color: #9a9aa2;
+    border: none;
+    border-bottom: 1px solid #2c2c32;
+    padding: 6px 8px;
+    font-weight: 600;
+}
+QTableCornerButton::section {
+    background-color: #141416;
+    border: none;
+}
+
+/* Welcome page — the failed-requirement rows. Calamares' ResultDelegate tints
+   each row from the Qt palette (amber for warnings, red for hard failures),
+   and with root's light palette those come out PALE, so the row text must be
+   DARK to be readable. QSS cannot change the tint; it can set the text. This
+   list only ever shows failed requirements, so the rule is scoped to it. */
 ResultsListWidget QListView {
     color: #1a1a1a;
     background-color: transparent;
     border: none;
 }
 
-/* ===== PACKAGE-CHOOSER LIST VIEW ============================================
-   The packagechooser module renders items in a QListView with per-row
-   checkboxes (Qt::CheckStateRole) drawn by the delegate — NOT real QCheckBox
-   widgets.  Indicator styling is repeated for both QCheckBox::indicator (in case
-   any page does use real widgets) and QListView::indicator (for the delegate
-   checkboxes). */
-
-/* Checkboxes — widget form (may not apply to packagechooser, kept as fallback). */
-QCheckBox {
-    color: #eaeaea;
-    spacing: 10px;
-    font-size: 10pt;
-}
-QCheckBox::indicator {
-    width: 20px;
-    height: 20px;
-    border: 2px solid rgba(255,255,255,0.50);
-    background-color: rgba(255,255,255,0.10);
-    border-radius: 4px;
-}
-QCheckBox::indicator:hover {
-    border-color: rgba(255,255,255,0.75);
-    background-color: rgba(255,255,255,0.16);
-}
-QCheckBox::indicator:checked {
-    background-color: #e6e6e6;
-    border-color: #e6e6e6;
-    image: url("/usr/share/calamares/branding/maze/checkmark.svg");
-}
-QCheckBox::indicator:checked:hover {
-    background-color: #f0f0f0;
-    border-color: #f0f0f0;
-    image: url("/usr/share/calamares/branding/maze/checkmark.svg");
-}
-QCheckBox::indicator:disabled {
-    border-color: rgba(255,255,255,0.15);
-    background-color: transparent;
-}
-
-/* Item-view indicator — the checkboxes painted by QStyledItemDelegate inside
-   the QListView.  Qt uses the *view's* palette for these, which on root's light
-   palette yields invisible dark-on-dark ticks.  Fill the checked box with
-   off-white so the SVG (dark stroke) or native tick is clearly visible. */
-QListView {
-    background-color: transparent;
-    border: none;
-    padding: 6px 0px;
-    outline: 0;
-    selection-background-color: rgba(255,255,255,0.08);
-    selection-color: #eaeaea;
-}
-QListView::indicator {
-    width: 20px;
-    height: 20px;
-    border: 2px solid rgba(255,255,255,0.50);
-    background-color: rgba(255,255,255,0.10);
-    border-radius: 4px;
-}
-QListView::indicator:hover {
-    border-color: rgba(255,255,255,0.75);
-    background-color: rgba(255,255,255,0.16);
-}
-QListView::indicator:checked {
-    background-color: #e6e6e6;
-    border-color: #e6e6e6;
-    image: url("/usr/share/calamares/branding/maze/checkmark.svg");
-}
-QListView::indicator:checked:hover {
-    background-color: #f0f0f0;
-    border-color: #f0f0f0;
-    image: url("/usr/share/calamares/branding/maze/checkmark.svg");
-}
-QListView::item {
-    padding: 12px 6px;
-    border-bottom: 1px solid rgba(255,255,255,0.05);
-    min-height: 44px;
-    color: #eaeaea;
-}
-QListView::item:hover {
-    background-color: rgba(255,255,255,0.04);
-}
-QListView::item:selected {
-    color: #ffffff;
-    background-color: rgba(255,255,255,0.06);
-}
-QListView QLabel {
-    color: #888899;
-    font-size: 9pt;
-    padding-left: 2px;
-}
-
-/* Radio buttons — kept for any non-packagechooser page that may use them. */
-QRadioButton {
-    color: #eaeaea;
-    spacing: 8px;
-}
-QRadioButton::indicator {
-    width: 20px;
-    height: 20px;
-    border: 2px solid rgba(255,255,255,0.50);
-    background-color: rgba(255,255,255,0.10);
+/* ----- group boxes, frames, splitters --------------------------------------- */
+QGroupBox {
+    border: 1px solid #222226;
     border-radius: 10px;
+    margin-top: 14px;
+    padding: 12px 10px 8px 10px;
 }
-QRadioButton::indicator:hover {
-    border-color: rgba(255,255,255,0.75);
-    background-color: rgba(255,255,255,0.16);
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+    color: #9a9aa2;
+    font-weight: 600;
 }
-QRadioButton::indicator:checked {
-    background-color: #e6e6e6;
-    border-color: #e6e6e6;
-}
-QRadioButton::indicator:checked:hover {
-    background-color: #f0f0f0;
-    border-color: #f0f0f0;
-}
-QRadioButton::indicator:disabled {
-    border-color: rgba(255,255,255,0.15);
-    background-color: transparent;
+QSplitter::handle {
+    background-color: #1d1d21;
 }
 
-/* Progress bar */
+/* ----- scroll bars -------------------------------------------------------- */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background-color: #2c2c32;
+    border-radius: 3px;
+    min-height: 32px;
+    min-width: 32px;
+}
+QScrollBar::handle:hover {
+    background-color: #45454d;
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0px;
+    height: 0px;
+}
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: transparent;
+}
+
+/* ----- progress (the install page) ----------------------------------------- */
 QProgressBar {
-    background-color: rgba(255,255,255,0.08);
+    background-color: #1a1a1d;
     border: none;
-    border-radius: 6px;
+    border-radius: 5px;
+    min-height: 10px;
+    max-height: 10px;
     text-align: center;
-    color: #ffffff;
+    color: transparent;
 }
 QProgressBar::chunk {
-    background-color: #e6e6e6;
+    background-color: #e6e6ea;
+    border-radius: 5px;
+}
+/* The installation progress bar shows its percentage ("%p%", set by Calamares)
+   — without a number a long, quiet step (building the boot images, the system
+   update) looks frozen. The number sits to the RIGHT of the bar, in the bar's
+   right margin, so it reads the same at 5 % and at 95 % (drawn on the bar it
+   vanished, white on the white fill). */
+QProgressBar#exec-progress {
+    min-height: 12px;
+    max-height: 12px;
     border-radius: 6px;
+    margin-right: 64px;
+    text-align: right;
+    color: #f2f2f4;
+    font-weight: 700;
+}
+QProgressBar#exec-progress::chunk {
+    border-radius: 6px;
+}
+
+/* ----- dialogs ------------------------------------------------------------ */
+QDialog, QMessageBox {
+    background-color: #121214;
+}
+QMessageBox QLabel {
+    color: #ececf0;
 }

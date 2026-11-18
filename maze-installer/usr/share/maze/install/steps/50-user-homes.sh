@@ -1,3 +1,8 @@
+# @title      User home folders
+# @title.tr   Kullanıcı ev dizinleri
+# @timeout    600
+# @weight     1
+
 # 3) Apply the desktop config to the user(s) created by the installer -------
 log "Applying Maze defaults to user home directories"
 for home in "${TARGET}"/home/*; do
@@ -17,6 +22,10 @@ for home in "${TARGET}"/home/*; do
         warn "skipping ${home}: not a valid user name"
         continue
     fi
+    # The Maze Ghost account (maze-ghost) is not a desktop user: its home is a
+    # root-owned mount point that becomes a tmpfs at login, and it must not
+    # join the `maze` group (that drives Maze Guard's firewall without root).
+    [[ "${user}" == "ghost" ]] && continue
     _pw_home=$(in_chroot getent passwd "${user}" 2>/dev/null | cut -d: -f6)
     if [[ "${_pw_home}" != "/home/${user}" ]]; then
         warn "skipping ${home}: no account owns it"
@@ -118,3 +127,30 @@ EOF
     in_chroot usermod -s /usr/bin/zsh "${user}" >/dev/null 2>&1 || true
 done
 
+
+# Login screen: preselect the account made in the installer. With no
+# remembered user SDDM preselects the first account in its list, which is
+# sorted by name — so the passwordless Maze Ghost account ("ghost") came up
+# first for any user named after it, as if it were the system's own user.
+# The installer's account is the newest regular one (the live 'maze' user is
+# already gone), so it is the highest uid that is not ghost.
+_primary_user=$(awk -F: '$3>=1000 && $3<60000 && $1!="ghost" && $3>u {u=$3; n=$1} END {print n}' \
+    "${TARGET}/etc/passwd" 2>/dev/null)
+if [[ -n "${_primary_user}" ]]; then
+    _sddm_state="${TARGET}/var/lib/sddm/state.conf"
+    # Keep a remembered session, if the image has one; only the user changes.
+    _sddm_session=$(sed -n '/^\[Last\]/,/^\[/{s/^Session=//p}' "${_sddm_state}" 2>/dev/null | head -1)
+    mkdir -p "$(dirname "${_sddm_state}")"
+    # The block's status is its last command's: the Session line must be an
+    # `if`, not `[[ ]] &&`, or a missing session reads as a failed write.
+    if {
+        printf '[Last]\n'
+        printf 'User=%s\n' "${_primary_user}"
+        if [[ -n "${_sddm_session}" ]]; then printf 'Session=%s\n' "${_sddm_session}"; fi
+    } > "${_sddm_state}"; then
+        log "Login screen preselects ${_primary_user}"
+    else
+        warn "could not write ${_sddm_state#"${TARGET}"}; the login screen may preselect another account"
+    fi
+    in_chroot chown sddm:sddm /var/lib/sddm/state.conf >/dev/null 2>&1 || true
+fi

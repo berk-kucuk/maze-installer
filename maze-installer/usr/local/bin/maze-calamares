@@ -44,13 +44,32 @@ if [[ "${EUID}" -ne 0 ]]; then
     trap 'xhost -SI:localuser:root >/dev/null 2>&1 || true' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
+    # Re-run THIS script as root (not calamares directly) so the preflight
+    # below runs before Calamares opens. The live medium's 49-maze-calamares
+    # polkit rule lets the wheel live user pkexec without a password.
     pkexec env \
         DISPLAY="${DISPLAY:-:0}" \
         XAUTHORITY="${XAUTHORITY:-}" \
         XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+        LANG="${LANG:-}" \
+        LANGUAGE="${LANGUAGE:-}" \
         QT_QPA_PLATFORM=xcb \
-        calamares -d
+        "$(readlink -f "$0")"
     exit $?
 fi
 
-exec env QT_QPA_PLATFORM=xcb calamares -d
+export QT_QPA_PLATFORM=xcb
+
+# Preflight: warn, before anything else, about what would make an install fail
+# or not boot — an existing EFI partition too small for Maze (installing next
+# to Windows), Windows left hibernated by Fast Startup, BitLocker. Read-only.
+# Only an explicit "Cancel" stops here: if the check itself breaks or hangs,
+# the installer still opens (the blocking checks run again inside Calamares,
+# before the disk is touched).
+_preflight=/usr/share/maze/install/preflight.py
+if [[ -r "${_preflight}" ]] && command -v python3 >/dev/null 2>&1; then
+    timeout 3700 python3 "${_preflight}" --gui
+    [[ $? -eq 10 ]] && exit 0
+fi
+
+exec calamares -d

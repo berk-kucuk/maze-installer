@@ -1,3 +1,8 @@
+# @title      Language, hostname and encryption
+# @title.tr   Dil, bilgisayar adı ve şifreleme
+# @timeout    600
+# @weight     1
+
 # 5c) Locale: make date/number formats follow the LANGUAGE -----------------
 # Calamares can set the FORMAT locales (LC_TIME, LC_NUMERIC, ...) to the install
 # LOCATION's country (e.g. Turkey -> tr_TR) even when the chosen language is
@@ -29,6 +34,9 @@ fi
 # makes every unlock (initramfs `encrypt` hook, crypttab, manual) honour it,
 # independent of bootloader or kernel cmdline. Runs live (dontChroot) against the
 # already-open target mapper; refresh re-uses the in-kernel key (no passphrase).
+# Privacy cost, kept on purpose (audit IN2): the free-block map becomes visible
+# to someone holding the disk (fill level, file-system type, usage pattern —
+# no file contents). How to turn it off: README.md, "TRIM on an encrypted disk".
 _root_src="$(findmnt -no SOURCE "${TARGET}" 2>/dev/null | sed 's/\[.*\]//')"
 if [[ "${_root_src}" == /dev/mapper/* ]]; then
     _luks_name="${_root_src##*/}"

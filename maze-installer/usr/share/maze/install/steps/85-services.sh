@@ -1,3 +1,8 @@
+# @title      System services and firewall
+# @title.tr   Sistem servisleri ve güvenlik duvarı
+# @timeout    900
+# @weight     2
+
 # 6) Enable services on the target -----------------------------------------
 # Non-security services are always enabled. Security services are enabled only
 # if the user kept them in the installer's Security section (empty = all).
@@ -24,7 +29,7 @@ fi
 #     sudo pacman -S qemu-desktop libvirt virt-manager edk2-ovmf
 #
 # The old block here was gated on the Extras packagechooser selection, but that
-# page was removed and EXTRAS_CSV is hardcoded to "none" at the top of this
+# page was removed and EXTRAS_CSV was hardcoded to "none" at the top of this
 # script — so the gate could never open and the code (plus the matching
 # `systemctl enable libvirtd`) was dead on every single install. Removed rather
 # than left to look like a feature that runs.
@@ -33,10 +38,23 @@ fi
 # (maze-tools) on demand, which pulls vmware-workstation + open-vm-tools via paru.
 
 log "Enabling base Maze services"
-for svc in ollama acpid power-profiles-daemon smartd fstrim.timer bluetooth cups \
-           tor systemd-oomd fwupd-refresh.timer reflector.timer maze-flatpak-setup.service \
+for svc in acpid power-profiles-daemon smartd fstrim.timer \
+           systemd-oomd fwupd-refresh.timer reflector.timer maze-flatpak-setup.service \
            maze-switchd.service maze-sentinel-setup.service maze-sentinel.service; do
     in_chroot systemctl enable "${svc}" >/dev/null 2>&1 || true
+done
+
+# The services the Options page lets the user leave out (all on by default).
+# Unticked ones are DISABLED, not just left alone: the live medium may have
+# enabled them, and unpackfs copied that.
+for _o in ollama:ollama tor:tor cups:cups bluetooth:bluetooth; do
+    _name="${_o%%:*}"; _unit="${_o#*:}"
+    if maze_option "${_name}" on; then
+        in_chroot systemctl enable "${_unit}" >/dev/null 2>&1 || true
+    else
+        in_chroot systemctl disable "${_unit}" >/dev/null 2>&1 || true
+        log "Service ${_unit} left off (unticked on the Options page)"
+    fi
 done
 
 # Monthly btrfs scrub of the root filesystem (btrfs-progs' own timer; `/` is the
@@ -54,9 +72,10 @@ if [[ "$(findmnt -no FSTYPE "${TARGET}" 2>/dev/null)" == btrfs ]]; then
 fi
 
 # Disable LIVE-only services that unpackfs carried over but must NOT run on an
-# installed desktop. sshd is the important one: the live ISO enables it for
-# remote installs, so without this every installed Maze boots with an SSH server
-# listening — an attack surface a privacy desktop should not expose by default.
+# installed desktop. sshd is the important one: older live ISOs enabled it for
+# remote installs (current ones no longer do), so without this every installed
+# Maze could boot with an SSH server listening — an attack surface a privacy
+# desktop should not expose by default.
 # (The Maze sshd hardening drop-in stays in place, so if the user enables sshd
 # later it is already hardened.) The VM guest agents are harmless on real
 # hardware but pointless to keep enabled.
@@ -72,13 +91,24 @@ log "Disabling live-only services on the target (sshd, VM guest agents, cloud-in
 # choose-mirror + livecd-talk are condition-gated (kernel cmdline) so they never
 # actually run on the target, but disable them anyway so `systemctl` output on
 # the installed system carries no live-medium leftovers.
-for svc in sshd vboxservice \
+for svc in vboxservice \
            hv_kvp_daemon hv_vss_daemon hv_fcopy_daemon \
            vmtoolsd vmware-vmblock-fuse \
            choose-mirror livecd-talk \
            cloud-init-local cloud-init-network cloud-init-main cloud-config cloud-final; do
     in_chroot systemctl disable "${svc}" >/dev/null 2>&1 || true
 done
+# sshd: off unless the user ticked "SSH server" on the Options page (the live
+# medium enables it for remote installs; an installed privacy desktop should
+# not listen on port 22 by default). Maze's sshd hardening drop-in is in place
+# either way.
+if maze_option sshd off; then
+    in_chroot systemctl enable sshd >/dev/null 2>&1 \
+        && log "SSH server enabled (ticked on the Options page)" \
+        || warn "could not enable sshd"
+else
+    in_chroot systemctl disable sshd >/dev/null 2>&1 || true
+fi
 
 # Disable services the archiso LIVE medium enables but that only slow an
 # INSTALLED desktop boot (they sat on the boot critical-chain for ~35s combined):
@@ -100,27 +130,19 @@ for svc in pacman-init.service systemd-time-wait-sync.service \
     in_chroot systemctl disable "${svc}" >/dev/null 2>&1 || true
 done
 
-# Resolve the selected security features (empty selection => all of them).
-sec_selected() {
-    local key="$1"
-    # Empty OR the literal "all" both mean "every security feature is on".
-    # Calamares invokes this script with the security CSV as "all" for the
-    # default install. Without the "all" case, sec_selected would treat "all" as
-    # a feature name matching nothing, so EVERY real feature (apparmor, firewalld,
-    # fail2ban, macchanger, …) would read as unselected — silently not enabling
-    # them.
-    [[ -z "${SECURITY_CSV}" || "${SECURITY_CSV}" == "all" ]] && return 0
-    case ",${SECURITY_CSV}," in
-        *",${key},"*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
 
 log "Applying Security selection: ${SECURITY_CSV:-<all>}"
-sec_selected apparmor   && in_chroot systemctl enable apparmor          >/dev/null 2>&1 || true
-sec_selected firewalld  && in_chroot systemctl enable firewalld         >/dev/null 2>&1 || true
-sec_selected auditd     && in_chroot systemctl enable auditd            >/dev/null 2>&1 || true
-sec_selected clamav     && in_chroot systemctl enable clamav-freshclam  >/dev/null 2>&1 || true
+# An unticked feature is disabled, not just left alone (the live medium may have
+# enabled it, and unpackfs copied that).
+for _s in apparmor:apparmor firewalld:firewalld auditd:auditd clamav:clamav-freshclam; do
+    _key="${_s%%:*}"; _unit="${_s#*:}"
+    if sec_selected "${_key}"; then
+        in_chroot systemctl enable "${_unit}" >/dev/null 2>&1 || true
+    else
+        in_chroot systemctl disable "${_unit}" >/dev/null 2>&1 || true
+        log "Security feature ${_key} left off (${_unit} disabled)"
+    fi
+done
 # MAC randomization is owned exclusively by maze-guard now (its privileged helper
 # manages the interface's MAC). There is no NetworkManager drop-in or mac-changer
 # service to toggle here anymore — those were removed because a second randomiser

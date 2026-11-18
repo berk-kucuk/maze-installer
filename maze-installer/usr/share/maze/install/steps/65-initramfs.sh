@@ -1,3 +1,9 @@
+# @title      Initramfs and boot splash
+# @title.tr   Initramfs ve açılış ekranı
+# @timeout    900
+# @weight     3
+# @exports    ROOT_IS_LUKS mkconf
+
 # 4) Plymouth boot splash --------------------------------------------------
 log "Configuring Plymouth"
 mkconf="${TARGET}/etc/mkinitcpio.conf"

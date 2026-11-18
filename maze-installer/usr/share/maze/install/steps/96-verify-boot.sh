@@ -1,3 +1,8 @@
+# @title      Verifying the boot chain
+# @title.tr   Önyükleme zinciri doğrulanıyor
+# @timeout    1800
+# @weight     5
+
 # 12) FINAL Secure Boot re-sign. The AUR/app phase can regenerate the initramfs
 # AFTER the initial signing (e.g. an nvidia or mkinitcpio pull). Force kernel-install
 # to rebuild the UKI (layout=uki) from the CURRENT kernel+initramfs+cmdline, then

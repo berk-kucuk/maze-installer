@@ -1,3 +1,8 @@
+# @title      Removing live-session leftovers
+# @title.tr   Canlı oturum kalıntıları temizleniyor
+# @timeout    900
+# @weight     2
+
 # 2c-bis) Strip LIVE-ONLY files that the Calamares OFFLINE (unpackfs) install
 # copies wholesale onto the target. The live medium is intentionally permissive
 # (passwordless sudo/pkexec, autologin) so the installer can run unattended; NONE

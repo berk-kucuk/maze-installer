@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Maze Linux Calamares slideshow generator — writes slide-NN.svg (1600x960)."""
+"""Maze Linux Calamares slideshow generator — writes slide-NN.svg (English) and
+slide-NN.tr.svg (Turkish), 1600x960. show.qml picks the set for the language
+the installer runs in. Render each to PNG next to it (rsvg-convert)."""
 import base64, os, sys
 
 OUT = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +22,7 @@ FG = "#f4f4f5"
 DIM = "#9d9da8"
 LINE = "#e9e9ee"
 
-DEFS = f"""
+DEFS = """
 <defs>
   <radialGradient id="bloom" cx="0.72" cy="0.55" r="0.55">
     <stop offset="0" stop-color="#262629" stop-opacity="0.85"/>
@@ -83,15 +85,72 @@ def svg(body):
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
             f'viewBox="0 0 {W} {H}">{DEFS}{background()}{body}</svg>')
 
+
+# Every word on the slides, per language. Lines must stay short: titles ~22
+# characters, bullets ~44, or they run off the right edge.
+TEXT = {
+    "en": {
+        "welcome": ("Welcome to Maze Linux", "A private, secure and AI-native desktop.",
+                    "Sit back — the installation takes a few minutes."),
+        2: ("SECURE BY DEFAULT", ["Protected from", "the first instruction"],
+            ["Secure Boot with a key unique to your PC", "Full-disk encryption (LUKS2)",
+             "AppArmor and a firewall, on out of the box"]),
+        3: ("YOUR NETWORK, YOUR RULES", ["Every connection", "under your control"],
+            ["Maze Guard spots attacks on public Wi-Fi", "Maze Cloak randomizes your MAC address",
+             "Kill switches for camera, microphone, radios"]),
+        4: ("ANONYMOUS BY DESIGN", ["Private conversations,", "private files"],
+            ["Haze: encrypted peer-to-peer chat over Tor", "HazeDrop: anonymous encrypted file transfer",
+             "Entropy Shield: Tor, DNSCrypt and I2P"]),
+        5: ("AI THAT STAYS HOME", ["Your AI,", "on your machine"],
+            ["Maze AI runs local models with Ollama", "By default, nothing leaves your computer",
+             "Every risky action asks you first"]),
+        6: ("SAFETY NET", ["Broke something?", "Just go back."],
+            ["A snapshot before every update", "Roll back with one command: maze-rollback",
+             "A recovery image if an update breaks boot"]),
+        7: ("ALWAYS UP TO DATE", ["Rolling, signed,", "and checked"],
+            ["Updates are signed by Maze and Arch Linux", "Maze Control Center for everyday settings",
+             "maze-doctor tells you if anything is wrong"]),
+        "before update": "before update",
+        "all good": "all good",
+    },
+    "tr": {
+        "welcome": ("Maze Linux'a hoş geldiniz", "Gizli, güvenli ve yapay zekâ destekli bir masaüstü.",
+                    "Arkanıza yaslanın — kurulum birkaç dakika sürer."),
+        2: ("VARSAYILAN OLARAK GÜVENLİ", ["İlk komuttan", "itibaren korumalı"],
+            ["Bilgisayarınıza özel anahtarla Secure Boot", "Tam disk şifreleme (LUKS2)",
+             "AppArmor ve güvenlik duvarı hazır gelir"]),
+        3: ("AĞINIZ, KURALLARINIZ", ["Her bağlantı", "sizin kontrolünüzde"],
+            ["Maze Guard açık Wi-Fi'da saldırıyı yakalar", "Maze Cloak MAC adresinizi rastgele yapar",
+             "Kamera, mikrofon ve radyolar için kapatma"]),
+        4: ("TASARIMDAN ANONİM", ["Gizli sohbetler,", "gizli dosyalar"],
+            ["Haze: Tor üzerinden şifreli P2P sohbet", "HazeDrop: anonim, şifreli dosya aktarımı",
+             "Entropy Shield: Tor, DNSCrypt ve I2P"]),
+        5: ("EVDE KALAN YAPAY ZEKÂ", ["Yapay zekânız,", "kendi makinenizde"],
+            ["Maze AI yerel modelleri Ollama'yla çalıştırır", "Varsayılan olarak hiçbir şey dışarı çıkmaz",
+             "Riskli her işlemde önce size sorar"]),
+        6: ("GÜVENLİK AĞI", ["Bir şey mi bozuldu?", "Geri dönün."],
+            ["Her güncellemeden önce bir anlık görüntü", "Tek komutla geri alın: maze-rollback",
+             "Açılış bozulursa kurtarma imajı"]),
+        7: ("HER ZAMAN GÜNCEL", ["Sürekli, imzalı", "ve denetlenmiş"],
+            ["Güncellemeler Maze ve Arch Linux imzalı", "Günlük ayarlar için Maze Control Center",
+             "maze-doctor bir sorun varsa söyler"]),
+        "before update": "güncellemeden önce",
+        "all good": "her şey yolunda",
+    },
+}
+LANG = sys.argv[2] if len(sys.argv) > 2 else "en"
+L = TEXT[LANG]
+SUFFIX = "" if LANG == "en" else "." + LANG
+
 slides = []
 
 # 1 — welcome
 slides.append(f"""
 <circle cx="800" cy="400" r="340" fill="url(#halo)"/>
 <image href="data:image/png;base64,{LOGO}" x="565" y="170" width="470" height="262"/>
-<text x="800" y="545" text-anchor="middle" font-family="{FONT}" font-size="58" font-weight="700" fill="url(#silver)">Welcome to Maze Linux</text>
-<text x="800" y="605" text-anchor="middle" font-family="{FONT}" font-size="29" fill="{DIM}">A private, secure and AI-native desktop.</text>
-<text x="800" y="650" text-anchor="middle" font-family="{FONT}" font-size="29" fill="{DIM}">Sit back — the installation takes a few minutes.</text>
+<text x="800" y="545" text-anchor="middle" font-family="{FONT}" font-size="58" font-weight="700" fill="url(#silver)">{L["welcome"][0]}</text>
+<text x="800" y="605" text-anchor="middle" font-family="{FONT}" font-size="29" fill="{DIM}">{L["welcome"][1]}</text>
+<text x="800" y="650" text-anchor="middle" font-family="{FONT}" font-size="29" fill="{DIM}">{L["welcome"][2]}</text>
 {footer(1)}""")
 
 # 2 — secure boot chain
@@ -100,11 +159,7 @@ shield = """
 <rect x="-70" y="-60" width="140" height="140" rx="6"/>
 <path d="M-70,-10 H-40 V40 H40 V-10"/>
 <circle cx="0" cy="5" r="14"/><path d="M0,19 V40"/>"""
-slides.append(art(shield) + text_block(
-    "SECURE BY DEFAULT", ["Protected from", "the first instruction"],
-    ["Secure Boot with a key unique to your PC",
-     "Full-disk encryption (LUKS2)",
-     "AppArmor and a firewall, on out of the box"]) + footer(2))
+slides.append(art(shield) + text_block(*L[2]) + footer(2))
 
 # 3 — network control
 net = """
@@ -115,11 +170,7 @@ net = """
 <path d="M-160,-126 L-55,-40"/><path d="M160,-126 L55,-40"/><path d="M-160,126 L-55,40"/>
 <path d="M160,126 L55,40" stroke-dasharray="4 16"/>
 <path d="M92,68 L128,104 M128,68 L92,104" stroke-width="7"/>"""
-slides.append(art(net) + text_block(
-    "YOUR NETWORK, YOUR RULES", ["Every connection", "under your control"],
-    ["Maze Guard spots attacks on public Wi-Fi",
-     "Maze Cloak randomizes your MAC address",
-     "Kill switches for camera, microphone, radios"]) + footer(3))
+slides.append(art(net) + text_block(*L[3]) + footer(3))
 
 # 4 — Tor
 onion = """
@@ -127,11 +178,7 @@ onion = """
 <circle r="16" fill="#e9e9ee"/>
 <path d="M-300,-40 C-200,-40 -150,40 -60,20" stroke-dasharray="2 14"/>
 <path d="M60,-20 C150,-40 200,40 300,40" stroke-dasharray="2 14"/>"""
-slides.append(art(onion) + text_block(
-    "ANONYMOUS BY DESIGN", ["Private conversations,", "private files"],
-    ["Haze: encrypted peer-to-peer chat over Tor",
-     "HazeDrop: anonymous encrypted file transfer",
-     "Entropy Shield: Tor, DNSCrypt and I2P"]) + footer(4))
+slides.append(art(onion) + text_block(*L[4]) + footer(4))
 
 # 5 — local AI
 chip = "".join(
@@ -143,26 +190,18 @@ chip = f"""
 {chip}
 <text x="0" y="24" text-anchor="middle" font-family="{FONT}" font-size="72" font-weight="700"
       fill="#e9e9ee" stroke="none">AI</text>"""
-slides.append(art(chip) + text_block(
-    "AI THAT STAYS HOME", ["Your AI,", "on your machine"],
-    ["Maze AI runs local models with Ollama",
-     "By default, nothing leaves your computer",
-     "Every risky action asks you first"]) + footer(5))
+slides.append(art(chip) + text_block(*L[5]) + footer(5))
 
 # 6 — snapshots / rollback
-snap = """
+snap = f"""
 <path d="M-230,60 H230"/>
 <circle cx="-180" cy="60" r="20"/><circle cx="-60" cy="60" r="20"/>
 <circle cx="60" cy="60" r="20"/><circle cx="180" cy="60" r="26" fill="#e9e9ee"/>
 <path d="M180,20 C180,-130 -60,-130 -60,20" stroke-dasharray="1 0"/>
 <path d="M-84,-8 L-60,22 L-36,-8"/>
 <text x="-60" y="140" text-anchor="middle" font-family="'DejaVu Sans', sans-serif" font-size="26"
-      fill="#9d9da8" stroke="none">before update</text>"""
-slides.append(art(snap) + text_block(
-    "SAFETY NET", ["Broke something?", "Just go back."],
-    ["A snapshot before every update",
-     "Roll back with one command: maze-rollback",
-     "A recovery kernel in the boot menu"]) + footer(6))
+      fill="#9d9da8" stroke="none">{L['before update']}</text>"""
+slides.append(art(snap) + text_block(*L[6]) + footer(6))
 
 # 7 — updates / tools
 term = f"""
@@ -172,14 +211,10 @@ term = f"""
 <text x="-196" y="-36" font-family="{MONO}" font-size="30" fill="#e9e9ee" stroke="none">$ sudo pacman -Syu</text>
 <text x="-196" y="16" font-family="{MONO}" font-size="30" fill="#9d9da8" stroke="none">$ maze-doctor</text>
 <path d="M-196,70 L-176,92 L-138,52" stroke-width="6"/>
-<text x="-118" y="84" font-family="{MONO}" font-size="26" fill="#9d9da8" stroke="none">all good</text>"""
-slides.append(art(term) + text_block(
-    "ALWAYS UP TO DATE", ["Rolling, signed,", "and checked"],
-    ["Updates are signed by Maze and Arch Linux",
-     "Maze Control Center for everyday settings",
-     "maze-doctor tells you if anything is wrong"]) + footer(7))
+<text x="-118" y="84" font-family="{MONO}" font-size="26" fill="#9d9da8" stroke="none">{L['all good']}</text>"""
+slides.append(art(term) + text_block(*L[7]) + footer(7))
 
 for i, body in enumerate(slides, 1):
-    with open(os.path.join(OUT, f"slide-{i:02d}.svg"), "w") as f:
+    with open(os.path.join(OUT, f"slide-{i:02d}{SUFFIX}.svg"), "w") as f:
         f.write(svg(body))
 print(f"{len(slides)} slides")

@@ -8,13 +8,17 @@ welcomeStyleCalamares: true
 welcomeExpandingLogo: false
 
 windowExpanding: normal
-windowSize: 980px,640px
+# Roomier than the old 980x640: the partition page (disk bar + table + the
+# encryption fields) was cramped, and the slideshow had to shrink.
+windowSize: 1100px,720px
 windowPlacement: center
 
-# 'widget' is the traditional sidebar (logo + step list) and DOES use the 'style'
-# colours below. ('none' would hide it entirely — do NOT use that.)
-sidebar: widget
-navigation: widget
+# Both panels are QML (calamares-sidebar.qml, calamares-navigation.qml in this
+# directory): a numbered stepper with check marks and an overall progress bar
+# on the left, Cancel / Back / Next at the bottom with Next as the one primary
+# button. Their colours still come from the `style:` block below.
+sidebar: qml
+navigation: qml
 
 strings:
     productName:         Maze Linux
@@ -34,8 +38,10 @@ images:
     # LINUX" wordmark gets horizontally squashed in the narrow sidebar slot, so
     # use the square block there; the full wordmark stays on the welcome page.
     productLogo:    "maze-simple-logo.png"
-    # Window/taskbar icon = the same square block (a wide logo squashes here too).
-    productIcon:    "maze-simple-logo.png"
+    # Window/taskbar icon = the installer's own icon (the Maze mark with an
+    # install sign in its core; design/installer-icon/), the same one the menu
+    # and the panel launcher show.
+    productIcon:    "maze-installer-icon.png"
     productWelcome: "maze-logo.png"
 
 # Simple OLED slideshow (single QML); replace with a richer slideshow later.

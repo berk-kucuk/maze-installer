@@ -1,3 +1,9 @@
+# @title      Graphics and keyboard drivers
+# @title.tr   Ekran kartı ve klavye sürücüleri
+# @timeout    1200
+# @weight     2
+# @exports    KBD_PARAMS NVIDIA_PARAMS
+
 # 3b) GPU: configure the NVIDIA proprietary driver if the installer added it ---
 NVIDIA_PARAMS=""
 if in_chroot pacman -Qq nvidia nvidia-dkms nvidia-open nvidia-open-dkms nvidia-lts 2>/dev/null | grep -q .; then

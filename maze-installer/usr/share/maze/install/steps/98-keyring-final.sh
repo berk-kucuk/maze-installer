@@ -1,3 +1,8 @@
+# @title      Finalising the keyring
+# @title.tr   Anahtarlık son ayarları
+# @timeout    600
+# @weight     2
+
 # 13) FINAL pacman keyring init. The earlier init (step 8b) runs on top of the
 # /etc/pacman.d/gnupg that unpackfs copied from the LIVE medium, so re-running
 # --init there does NOT regenerate the local master key and the installed system

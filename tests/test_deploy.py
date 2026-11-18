@@ -30,6 +30,11 @@ INSTALL = ROOT / "maze-installer" / "usr" / "share" / "maze" / "install"
 DRIVER = INSTALL / "deploy-to-target.sh"
 STEPS = INSTALL / "steps"
 
+
+def is_library(f):
+    return any(l.startswith("# @library") for l in f.read_text().splitlines()[:15])
+
+
 ARCH_CHROOT = r'''#!/usr/bin/env python3
 import json, os, re, subprocess, sys
 target, argv = sys.argv[1], sys.argv[2:]
@@ -171,16 +176,16 @@ class DeployHarness(unittest.TestCase):
     def read(self, rel):
         return (self.target / rel).read_text()
 
-    def run_steps(self, *steps, extra_steps=None, env=None):
-        """Run the driver with only these steps (00-setup and 10-helpers always
-        run). extra_steps: {name: bash} added as additional step files."""
+    def run_steps(self, *steps, extra_steps=None, env=None, security="all"):
+        """Run the driver with only these steps (the @library files always
+        load). extra_steps: {name: bash} added as additional step files."""
         stepdir = self.tmp / "steps"
         if stepdir.exists():
             shutil.rmtree(stepdir)
         stepdir.mkdir()
-        wanted = {"00-setup", "10-helpers", *steps}
+        wanted = {*steps}
         for f in STEPS.glob("*.sh"):
-            if f.stem in wanted:
+            if f.stem in wanted or is_library(f):
                 shutil.copy(f, stepdir / f.name)
         for name, body in (extra_steps or {}).items():
             (stepdir / f"{name}.sh").write_text(body)
@@ -190,7 +195,7 @@ class DeployHarness(unittest.TestCase):
                  STUB_CFG=json.dumps(self.cfg),
                  MAZE_STEP_DIR=str(stepdir))
         e.update(env or {})
-        r = subprocess.run(["bash", str(DRIVER), str(self.target), "all", ""],
+        r = subprocess.run(["bash", str(DRIVER), str(self.target), security, ""],
                            env=e, capture_output=True, text=True, timeout=120)
         self.out = r.stdout + r.stderr
         return r
@@ -233,6 +238,70 @@ class TestDriver(DeployHarness):
                 code = re.sub(r"'[^']*'", "''", line.split("#", 1)[0])   # awk/sed programs
                 self.assertNotRegex(code, r"(^|[;&|]\s*)\s*exit\b",
                                     f"{f.name}:{n} ends the driver's shell: {line.strip()}")
+
+    def test_a_crashing_step_fails_the_install_but_not_the_steps_after_it(self):
+        r = self.run_steps(extra_steps={"50-crash": 'echo "$UNSET_ON_PURPOSE"\n',
+                                        "60-after": 'log "later step still ran"\n'})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("later step still ran", self.out)
+        summary = self.read("var/log/maze-install-summary.txt")
+        self.assertRegex(summary, r"50-crash\s+\d+s\s+-\s+failed")
+        self.assertRegex(summary, r"60-after\s+\d+s\s+-\s+ok")
+        self.assertIn("[50-crash] stopped with an error", summary)
+
+    def test_a_step_over_its_timeout_is_stopped(self):
+        r = self.run_steps(extra_steps={"50-hang": "# @timeout 1\nsleep 30\n",
+                                        "60-after": 'log "later step still ran"\n'})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("later step still ran", self.out)
+        self.assertRegex(self.read("var/log/maze-install-summary.txt"), r"50-hang\s+\d+s\s+-\s+timeout")
+
+    def test_a_stopped_step_does_not_leave_pacman_locked(self):
+        r = self.run_steps(extra_steps={
+            "50-hang": '# @timeout 1\nmkdir -p "${TARGET}/var/lib/pacman"\n'
+                       'touch "${TARGET}/var/lib/pacman/db.lck"\nsleep 30\n'})
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse((self.target / "var/lib/pacman/db.lck").exists())
+        self.assertIn("[50-hang] removed the pacman lock",
+                      self.read("var/log/maze-install-summary.txt"))
+
+    def test_only_exported_values_reach_the_next_step(self):
+        r = self.run_steps(extra_steps={
+            "50-set": "# @exports KEPT\nKEPT=yes\nDROPPED=yes\n",
+            "60-get": 'log "kept=${KEPT:-} dropped=${DROPPED:-}"\n'})
+        self.assertEqual(r.returncode, 0, self.out)
+        self.assertIn("kept=yes dropped=", self.out)
+        self.assertNotIn("dropped=yes", self.out)
+
+    def test_a_repair_run_keeps_what_earlier_steps_handed_on(self):
+        steps = {"50-set": "# @exports KEPT\nKEPT=yes\n",
+                 "60-get": 'log "kept=${KEPT:-}"\n'}
+        self.assertEqual(self.run_steps(extra_steps=steps).returncode, 0, self.out)
+        r = self.run_steps(extra_steps=steps, env={"MAZE_DEPLOY_STEPS": "60-get"})
+        self.assertEqual(r.returncode, 0, self.out)
+        self.assertIn("kept=yes", self.out)
+        self.assertNotIn("==== 50-set", self.out)
+        logs = self.target / "var/log/maze-installer/steps"
+        self.assertTrue((logs / "50-set.log").exists(), "the repair run deleted another step's log")
+
+    def test_every_step_has_its_own_log_and_result(self):
+        self.run_steps(extra_steps={"50-probe": 'warn "probe warning"\nlog "probe output"\n'})
+        logs = self.target / "var/log/maze-installer"
+        self.assertIn("probe output", (logs / "steps/50-probe.log").read_text())
+        self.assertIn("[50-probe] probe warning", (logs / "warnings.txt").read_text())
+        self.assertIn("50-probe\twarnings\t", (logs / "steps.tsv").read_text())
+        self.assertIn("@@maze-step 50-probe warnings ", self.out)
+
+    def test_every_real_step_is_described_for_the_progress_bar(self):
+        r = subprocess.run(["bash", str(DRIVER), "--list"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        listed = [l.split("\t") for l in r.stdout.splitlines()]
+        steps = sorted(f.stem for f in STEPS.glob("*.sh") if not is_library(f))
+        self.assertEqual([l[0] for l in listed], steps)
+        for name, timeout, weight, title, title_tr in listed:
+            self.assertRegex(timeout, r"^\d+$", name)
+            self.assertRegex(weight, r"^\d+$", name)
+            self.assertTrue(title and title_tr, name)
 
     def test_paru_is_built_first(self):
         r = self.run_steps(extra_steps={"50-probe": 'log "AUR=${CURATED_AUR[*]}"\n'})
@@ -373,6 +442,41 @@ class TestDesktopFiles(DeployHarness):
         self.assertIn("screenMapping=\n", applets)
 
 
+class TestUserHomes(DeployHarness):
+    PASSWD = ("root:x:0:0::/root:/bin/bash\n"
+              "ghost:x:1001:1001:Ghost:/home/ghost:/usr/bin/zsh\n"
+              "vm:x:1002:1002::/home/vm:/bin/bash\n")
+
+    def test_login_screen_preselects_the_installed_user_not_ghost(self):
+        self.write("etc/passwd", self.PASSWD)
+        (self.target / "home/vm").mkdir()
+        (self.target / "home/ghost").mkdir()
+        r = self.run_steps("45-first-login", "50-user-homes")
+        self.assertEqual(r.returncode, 0, self.out)
+        self.assertEqual(self.read("var/lib/sddm/state.conf"), "[Last]\nUser=vm\n")
+        self.assertIn("Login screen preselects vm", self.out)
+        self.assertNotIn("could not write", self.out)
+
+    def test_a_remembered_session_is_kept(self):
+        self.write("etc/passwd", self.PASSWD)
+        self.write("var/lib/sddm/state.conf", "[Last]\nUser=maze\nSession=/usr/share/wayland-sessions/plasma.desktop\n")
+        r = self.run_steps("45-first-login", "50-user-homes")
+        self.assertEqual(r.returncode, 0, self.out)
+        self.assertEqual(self.read("var/lib/sddm/state.conf"),
+                         "[Last]\nUser=vm\nSession=/usr/share/wayland-sessions/plasma.desktop\n")
+
+    def test_ghost_home_is_not_treated_as_a_desktop_user(self):
+        self.write("etc/passwd", self.PASSWD)
+        self.write("etc/skel/.zshrc", "# maze\n")
+        (self.target / "home/vm").mkdir()
+        (self.target / "home/ghost").mkdir()
+        r = self.run_steps("45-first-login", "50-user-homes")
+        self.assertEqual(r.returncode, 0, self.out)
+        self.assertFalse((self.target / "home/ghost/.zshrc").exists())
+        self.assertTrue((self.target / "home/vm/.zshrc").exists())
+        self.assertFalse(any("ghost" in c for c in self.chroot_calls() if "gpasswd" in c))
+
+
 class TestRootLock(DeployHarness):
     def test_an_empty_root_password_is_locked(self):
         self.write("etc/shadow", "root::19000::::::\nbin:!*:19000::::::\n")
@@ -415,6 +519,17 @@ class TestCmdlineAndInitramfs(DeployHarness):
         self.assertEqual(toks.count("quiet"), 1)
         self.assertIn("root=/dev/mapper/luks-abc", toks)
         self.assertIn("cryptdevice=UUID=abc:luks-abc:allow-discards", toks)
+
+    def test_verbose_boot_and_no_apparmor_from_the_options_page(self):
+        self.prepare()
+        r = self.run_steps("60-gpu-keyboard", "65-initramfs", "70-cmdline-uki", security="none",
+                           env={"MAZE_BOOT_GPU_DRV": "i915", "MAZE_OPTIONS": "opt-verbose-boot"})
+        self.assertEqual(r.returncode, 0, self.out)
+        toks = self.read("etc/kernel/cmdline").split()
+        for gone in ("quiet", "splash", "apparmor=1", "security=apparmor"):
+            self.assertNotIn(gone, toks)
+        self.assertIn("lsm=landlock,lockdown,yama,integrity,bpf", toks)
+        self.assertIn("root=/dev/mapper/luks-abc", toks)
 
     def test_rollback_mode_is_requested_on_btrfs(self):
         self.prepare()
@@ -530,7 +645,7 @@ class TestCmdlineAndInitramfs(DeployHarness):
         # 70 alone (no 65 to repair HOOKS) — the last line of defence.
         self.prepare(hooks="base udev autodetect modconf block filesystems")
         r = self.run_steps("60-gpu-keyboard", "70-cmdline-uki",
-                           extra_steps={"61-luks": "ROOT_IS_LUKS=1\nmkconf=\"${TARGET}/etc/mkinitcpio.conf\"\n"})
+                           extra_steps={"61-luks": "# @exports ROOT_IS_LUKS mkconf\nROOT_IS_LUKS=1\nmkconf=\"${TARGET}/etc/mkinitcpio.conf\"\n"})
         self.assertEqual(r.returncode, 1, self.out)
         self.assertIn("'encrypt' hook MISSING", self.out)
 
@@ -598,7 +713,7 @@ class TestBootVerification(DeployHarness):
         p.write_bytes(b"MZ" + b"\0" * 64)
         return p
 
-    LUKS = {"61-luks": "ROOT_IS_LUKS=1\n"}
+    LUKS = {"61-luks": "# @exports ROOT_IS_LUKS\nROOT_IS_LUKS=1\n"}
 
     def test_a_keyfile_inside_a_boot_image_fails_the_install(self):
         self.esp_image()
@@ -625,11 +740,96 @@ class TestBootVerification(DeployHarness):
         self.write("boot/EFI/BOOT/BOOTX64.EFI", "shim\n")
         self.cfg["uname"] = "7.0.0-arch1-1"          # the image boots a kernel that is gone
         r = self.run_steps("26-secureboot-function", "96-verify-boot",
-                           extra_steps={"61-sb": 'MAZE_SB_ESP="/boot"\n'})
+                           extra_steps={"61-sb": '# @exports MAZE_SB_ESP\nMAZE_SB_ESP="/boot"\n'})
         self.assertEqual(r.returncode, 1, self.out)
         self.assertIn("this install will NOT boot", self.out)
         self.assertTrue((self.target / "var/lib/maze-secureboot/BOOT-STATUS.txt").exists())
         self.assertTrue(grub.exists())
+
+class TestInstallReport(DeployHarness):
+    """The first-login notification about the installation summary."""
+
+    def report(self, summary):
+        self.assertEqual(self.run_steps("97-install-report").returncode, 0, self.out)
+        script = self.target / "usr/local/lib/maze/install-report"
+        self.assertTrue(os.access(script, os.X_OK))
+        self.assertIn("Exec=/usr/local/lib/maze/install-report",
+                      self.read("etc/xdg/autostart/maze-install-report.desktop"))
+        home = self.tmp / "home"
+        home.mkdir(exist_ok=True)
+        (self.tmp / "summary.txt").write_text(summary)
+        calls = self.tmp / "notify.log"
+        (self.bin / "notify-send").write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> {calls}\n')
+        (self.bin / "notify-send").chmod(0o755)
+        env = dict(os.environ, HOME=str(home), LANG="en_US.UTF-8", MAZE_REPORT_DELAY="0",
+                   MAZE_INSTALL_SUMMARY=str(self.tmp / "summary.txt"),
+                   PATH=f"{self.bin}:{os.environ['PATH']}")
+        for _ in range(2):      # the second login must stay quiet
+            subprocess.run([str(script)], env=env, timeout=30, check=True)
+        return calls.read_text() if calls.exists() else ""
+
+    def test_warnings_are_reported_once(self):
+        out = self.report("step ...\n\nWarnings (2):\n  - [85-services] x\n  - [94-aur] y\n")
+        self.assertEqual(out.count("The installation finished with 2 warning(s)"), 1, out)
+
+    def test_critical_problems_are_reported(self):
+        out = self.report("CRITICAL — this installation is NOT safe to use as it is:\n  - x\n\nNo warnings.\n")
+        self.assertIn("The installation finished with problems", out)
+        self.assertIn("dialog-warning", out)
+
+    def test_a_clean_install_says_nothing(self):
+        self.assertEqual(self.report("step ...\n\nNo warnings.\n"), "")
+
+
+class TestOptionsPage(DeployHarness):
+    """The installer's Options page arrives as MAZE_OPTIONS (+ the security CSV)."""
+
+    def services(self, options, security="all"):
+        r = self.run_steps("85-services", security=security, env={"MAZE_OPTIONS": options})
+        self.assertEqual(r.returncode, 0, self.out)
+        return self.chroot_calls()
+
+    def test_without_the_page_every_service_is_as_before(self):
+        r = self.run_steps("85-services")
+        self.assertEqual(r.returncode, 0, self.out)
+        calls = self.chroot_calls()
+        for unit in ("ollama", "tor", "cups", "bluetooth", "apparmor", "firewalld"):
+            self.assertIn("systemctl enable " + unit, calls)
+        self.assertIn("systemctl disable sshd", calls)
+
+    def test_unticked_services_are_disabled_and_ticked_ones_enabled(self):
+        calls = self.services("opt-tor opt-sshd")
+        self.assertIn("systemctl enable tor", calls)
+        self.assertIn("systemctl enable sshd", calls)
+        for unit in ("ollama", "cups", "bluetooth"):
+            self.assertIn("systemctl disable " + unit, calls)
+            self.assertNotIn("systemctl enable " + unit, calls)
+
+    def test_unticked_security_features_are_disabled(self):
+        calls = self.services("", security="apparmor")
+        self.assertIn("systemctl enable apparmor", calls)
+        for unit in ("firewalld", "auditd", "clamav-freshclam"):
+            self.assertIn("systemctl disable " + unit, calls)
+
+    def test_app_choice_reaches_the_aur_step(self):
+        probe = 'log "AUR=${CURATED_AUR[*]} REMOVE=${MAZE_AUR_REMOVE[*]}"\n'
+        self.run_steps(extra_steps={"50-probe": probe},
+                       env={"MAZE_OPTIONS": "opt-app-joplin-bin opt-app-claude-code"})
+        self.assertIn("AUR=paru joplin-bin claude-code REMOVE=onlyoffice-bin upscayl-bin session-desktop-bin",
+                      self.out)
+
+    def test_without_the_page_the_aur_list_is_as_before(self):
+        self.run_steps(extra_steps={"50-probe": 'log "AUR=${CURATED_AUR[*]} REMOVE=${MAZE_AUR_REMOVE[*]:-}"\n'})
+        self.assertIn("AUR=paru onlyoffice-bin REMOVE=\n", self.out + "\n")
+
+    def test_mirrors_are_left_alone_when_ranking_fails(self):
+        self.write("etc/pacman.d/mirrorlist", "Server = https://old.example/$repo/os/$arch\n")
+        self.cfg["installed"] = ["reflector"]
+        probe = "pick_fastest_mirrors\n"
+        self.run_steps(extra_steps={"50-probe": probe}, env={"MAZE_OPTIONS": "opt-reflector"})
+        self.assertEqual(self.read("etc/pacman.d/mirrorlist"), "Server = https://old.example/$repo/os/$arch\n")
+        self.assertIn("could not rank the mirrors", self.out)
+        self.assertFalse((self.target / "etc/pacman.d/mirrorlist.maze-new").exists())
 
 
 if __name__ == "__main__":

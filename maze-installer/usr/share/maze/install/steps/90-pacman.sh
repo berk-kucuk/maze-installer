@@ -1,3 +1,8 @@
+# @title      Package manager and keyring
+# @title.tr   Paket yöneticisi ve anahtarlık
+# @timeout    900
+# @weight     3
+
 # 7) pacman tuning on the installed system (match the live medium) ---------
 log "Tuning pacman on the target"
 tconf="${TARGET}/etc/pacman.conf"
@@ -58,11 +63,11 @@ fi
 # — which then fails all AUR installs. The base Maze system does NOT ship
 # BlackArch, so scrub any stray [blackarch] section here for a clean slate.
 #
-# NOTE: This does NOT conflict with the OPTIONAL BlackArch install. When the user
-# picks "Maze Linux + BlackArch" on the installer, Calamares runs strap.sh via
-# the contextualprocess@blackarch-enable module AFTER this whole script finishes, so the
-# repo is (re-)added cleanly on top of the finalised keyring — never left in the
-# half-configured state this cleanup guards against.
+# NOTE: This does NOT conflict with OPTIONAL BlackArch. The installer no longer
+# offers it; a user who wants it runs `maze-enable-blackarch` (Maze Control
+# Center / Welcome) on the installed system, which adds the repo cleanly on top
+# of the finalised keyring — never in the half-configured state this guards
+# against.
 tconf="${TARGET}/etc/pacman.conf"
 if [[ -f "${tconf}" ]] && grep -q '^\[blackarch\]' "${tconf}"; then
     log "Removing stray BlackArch repo from target pacman.conf"

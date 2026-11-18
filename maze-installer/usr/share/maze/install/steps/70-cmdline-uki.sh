@@ -1,9 +1,25 @@
+# @title      Kernel parameters and boot images
+# @title.tr   Çekirdek parametreleri ve önyükleme imajları
+# @timeout    1800
+# @weight     8
+# @exports    MAZE_LUKS_DISCARD_CMDLINE
+
 # 5) Kernel command line — must be written BEFORE mkinitcpio so UKI picks it up.
-log "Adding kernel parameters (quiet splash bgrt_disable + AppArmor${NVIDIA_PARAMS:+ + NVIDIA}${KBD_PARAMS:+ + keyboard quirk})"
+# Options page: "Verbose boot" drops the splash for boot messages; an unticked
+# AppArmor leaves its LSM out (no point loading it with the service disabled).
+_quiet_params="quiet splash"
+_verbose=0
+if maze_option verbose-boot off; then
+    _quiet_params=""
+    _verbose=1
+fi
+_lsm_params="lsm=landlock,lockdown,yama,integrity,apparmor,bpf apparmor=1 security=apparmor"
+sec_selected apparmor || _lsm_params="lsm=landlock,lockdown,yama,integrity,bpf"
+log "Adding kernel parameters (${_quiet_params:-verbose boot} bgrt_disable$(sec_selected apparmor && echo ' + AppArmor')${NVIDIA_PARAMS:+ + NVIDIA}${KBD_PARAMS:+ + keyboard quirk})"
 # The full set of params Maze wants on every boot. NONE of these is root=/
 # rootflags=/rootfstype= — those belong to the installer and must never be
 # duplicated by us.
-EXTRA_PARAMS="quiet splash bgrt_disable logo.nologo lsm=landlock,lockdown,yama,integrity,apparmor,bpf apparmor=1 security=apparmor${NVIDIA_PARAMS}${KBD_PARAMS}"
+EXTRA_PARAMS="${_quiet_params:+${_quiet_params} }bgrt_disable logo.nologo ${_lsm_params}${NVIDIA_PARAMS}${KBD_PARAMS}"
 
 # /etc/kernel/cmdline is the authoritative source for UKI builds. Calamares'
 # bootloader module already wrote it with root=, rootflags=, etc. We APPEND
@@ -25,6 +41,15 @@ for _p in ${EXTRA_PARAMS}; do
     done
     [[ "${_present}" -eq 1 ]] || _new_cmdline="${_new_cmdline} ${_p}"
 done
+# Verbose boot also takes out the quiet/splash Calamares' bootloader module may
+# have written itself.
+if [[ "${_verbose}" -eq 1 ]]; then
+    _kept=""
+    for _e in ${_new_cmdline}; do
+        [[ "${_e}" == quiet || "${_e}" == splash ]] || _kept="${_kept} ${_e}"
+    done
+    _new_cmdline="${_kept# }"
+fi
 # TRIM through dm-crypt, the way that needs NO passphrase.
 #
 # The busybox `encrypt` hook (the one this install uses) reads
