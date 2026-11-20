@@ -220,6 +220,30 @@ keys are left untouched; kernel updates are re-signed automatically.
 
 Certificate:  /var/lib/maze-secureboot/MOK.cer  (also at the ESP root /MOK.cer)
 Check status:  mokutil --sb-state
+
+Optional — stop trusting the live-ISO key
+-----------------------------------------
+If you enrolled the Maze live-ISO key to boot the installer with Secure Boot
+on, it is still trusted. This system does not need it (it boots with its own
+key), and the same key is trusted by every machine that enrolled it. After the
+first normal boot:
+
+  sudo maze-sb-mok-cleanup           (shows what would be removed)
+  sudo maze-sb-mok-cleanup --apply   (then confirm in MokManager on reboot)
+
+To boot a Maze live USB with Secure Boot on again later, enroll its MOK.cer
+from MokManager once more.
+
+Optional — two passwords Maze does not set for you
+--------------------------------------------------
+Without them, anyone at the keyboard can switch Secure Boot off in the
+firmware, or enroll a key of their own in the blue MokManager screen. Set them
+only if you will not lose them; a forgotten firmware password can lock you out
+of your own firmware settings.
+
+  * Firmware setup ("supervisor" / "administrator") password: in the
+    firmware setup menu, usually under Security.
+  * MokManager password:  sudo mokutil --password
 SBNOTE
 
     # 6) Say so when the disk is not encrypted. The private key lives on the

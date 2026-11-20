@@ -19,9 +19,11 @@
 #
 # The recovery half of this is in maze-secureboot: sulogin refuses an account
 # with no usable password, so without a drop-in a locked root would also mean an
-# unreachable emergency shell. That package ships SULOGIN_FORCE=1 for
-# emergency.service and rescue.service, and the reasoning for why that is safe
-# on a sealed-cmdline system is written out there.
+# unreachable emergency shell. That package's maze-sulogin-generator sets
+# SULOGIN_FORCE=1 for emergency.service and rescue.service on every boot where
+# reaching that shell proves the LUKS passphrase was typed (passphrase-unlocked
+# encrypted root), and leaves sulogin's password check in place everywhere else
+# — the reasoning is written out in the generator.
 log "Locking the root account (login is via the wheel user + sudo)"
 if in_chroot passwd -l root >/dev/null 2>&1; then
     _root_state="$(in_chroot passwd -S root 2>/dev/null | awk '{print $2}' || true)"
