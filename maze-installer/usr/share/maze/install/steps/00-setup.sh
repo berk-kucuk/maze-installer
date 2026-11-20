@@ -66,7 +66,7 @@ maze_option() {
 #
 # onlyoffice-bin is deliberately kept OFF the ISO for size, so it is the one
 # app actually downloaded and built during the install. joplin-bin,
-# upscayl-bin, session-desktop-bin and claude-code are prebuilt on the ISO and
+# upscayl-bin and session-desktop-bin are prebuilt on the ISO and
 # arrive with unpackfs; listing them costs nothing (the AUR step skips what is
 # installed) and builds them if an ISO ever lacks one.
 #
@@ -78,7 +78,7 @@ MAZE_AUR_REMOVE=()
 if [[ -z "${MAZE_OPTIONS+x}" ]]; then
     CURATED_AUR+=(onlyoffice-bin)
 else
-    for _app in onlyoffice-bin joplin-bin upscayl-bin session-desktop-bin claude-code; do
+    for _app in onlyoffice-bin joplin-bin upscayl-bin session-desktop-bin; do
         if maze_option "app-${_app}" on; then
             CURATED_AUR+=("${_app}")
         else

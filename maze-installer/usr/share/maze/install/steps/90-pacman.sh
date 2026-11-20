@@ -39,7 +39,7 @@ fi
 # path on the BUILD host (…/MazeLinux/localrepo). On the installed target that
 # path does not exist, so the entry is dead weight — but worse, it keeps shadowing
 # the curated third-party AUR apps (upscayl-bin, joplin-bin,
-# session-desktop-bin, claude-code, paru, …): while those names still resolve to a
+# session-desktop-bin, paru, …): while those names still resolve to a
 # sync repo, pacman treats them as native packages and `paru -Syu` — which only
 # reconciles *foreign* (`pacman -Qm`) packages against the AUR — never offers their
 # updates. Dropping the section makes them foreign again so paru keeps them current

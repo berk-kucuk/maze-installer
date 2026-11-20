@@ -814,8 +814,8 @@ class TestOptionsPage(DeployHarness):
     def test_app_choice_reaches_the_aur_step(self):
         probe = 'log "AUR=${CURATED_AUR[*]} REMOVE=${MAZE_AUR_REMOVE[*]}"\n'
         self.run_steps(extra_steps={"50-probe": probe},
-                       env={"MAZE_OPTIONS": "opt-app-joplin-bin opt-app-claude-code"})
-        self.assertIn("AUR=paru joplin-bin claude-code REMOVE=onlyoffice-bin upscayl-bin session-desktop-bin",
+                       env={"MAZE_OPTIONS": "opt-app-joplin-bin opt-app-upscayl-bin"})
+        self.assertIn("AUR=paru joplin-bin upscayl-bin REMOVE=onlyoffice-bin session-desktop-bin",
                       self.out)
 
     def test_without_the_page_the_aur_list_is_as_before(self):

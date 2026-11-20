@@ -12,7 +12,7 @@
 
 pkgname=maze-installer
 pkgver=2.2.0
-pkgrel=16
+pkgrel=17
 pkgdesc="Maze Linux Calamares installer — launcher, config, branding and deploy-to-target logic"
 arch=('any')
 url="https://mazelinux.berkkucukk.com.tr"

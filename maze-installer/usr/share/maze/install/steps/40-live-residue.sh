@@ -96,8 +96,8 @@ rm -f "${TARGET}/etc/motd" 2>/dev/null || true
 # ...and replace it with one that documents the UPDATE MODEL, because this is the
 # single most surprising thing about the installed system.
 #
-# The third-party desktop apps (Joplin, Upscayl, Session, onlyoffice,
-# claude-code) come from the AUR: they were built into Maze's build-time local
+# The third-party desktop apps (Joplin, Upscayl, Session, onlyoffice) come
+# from the AUR: they were built into Maze's build-time local
 # repo and copied here by unpackfs, and that repo is deliberately dropped from
 # this machine's pacman.conf (its Server is a build-host file:// path). So pacman
 # has no repo that provides them — they are FOREIGN packages, and `pacman -Syu`
